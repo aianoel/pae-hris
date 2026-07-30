@@ -31,6 +31,7 @@ import {
   grossPay,
   totalDeductions,
   netPay,
+  statutoryBreakdown,
   type PayrollRow,
 } from "@/lib/payroll";
 
@@ -149,22 +150,44 @@ export function EmployeePayrollPanel({
                   </Section>
                 </TabsContent>
 
-                {/* Statutory */}
+                {/* Statutory — itemised from the configured contribution
+                    brackets (Contributions module), the same figures that make
+                    up Government Deductions and the register's SSS/PHIC/HDMF
+                    and BASE TAX lines. */}
                 <TabsContent value="statutory" className="space-y-4">
-                  <Section icon={Landmark} title="Government Contributions">
-                    <Row label="Social Security" value={formatCurrency(Math.round(row.govDeductions * 0.5))} tone="neg" />
-                    <Row label="Health Insurance" value={formatCurrency(Math.round(row.govDeductions * 0.3))} tone="neg" />
-                    <Row label="Retirement Fund" value={formatCurrency(Math.round(row.govDeductions * 0.2))} tone="neg" />
-                  </Section>
-                  <Section icon={Banknote} title="Loans">
-                    <Row label="Company loan" value={formatCurrency(row.loans)} tone="neg" />
-                    <Row label="Cash advance" value={formatCurrency(row.cashAdvance)} tone="neg" />
-                  </Section>
-                  <Section icon={Receipt} title="Tax Information">
-                    <Row label="Taxable income" value={formatCurrency(Math.max(0, grossPay(row) - row.govDeductions))} />
-                    <Row label="Withholding tax" value={formatCurrency(Math.round(grossPay(row) * 0.08))} tone="neg" />
-                    <Row label="Tax status" value="S1" />
-                  </Section>
+                  {(() => {
+                    const stat = statutoryBreakdown(row.basic);
+                    return (
+                      <>
+                        <Section icon={Landmark} title="Government Contributions">
+                          <Row label="SSS" value={formatCurrency(stat.sss)} tone="neg" />
+                          <Row label="PhilHealth" value={formatCurrency(stat.philHealth)} tone="neg" />
+                          <Row label="HDMF (Pag-IBIG)" value={formatCurrency(stat.pagIbig)} tone="neg" />
+                          <Row
+                            label="Total contributions"
+                            value={formatCurrency(stat.sss + stat.philHealth + stat.pagIbig)}
+                            tone="neg"
+                          />
+                        </Section>
+                        <Section icon={Banknote} title="Loans">
+                          <Row label="Company loan" value={formatCurrency(row.loans)} tone="neg" />
+                          <Row label="Cash advance" value={formatCurrency(row.cashAdvance)} tone="neg" />
+                        </Section>
+                        <Section icon={Receipt} title="Tax Information">
+                          {/* Withholding is computed on basic net of the three
+                              contributions — the same base the engine uses. */}
+                          <Row
+                            label="Taxable income"
+                            value={formatCurrency(
+                              Math.max(0, row.basic - (stat.sss + stat.philHealth + stat.pagIbig)),
+                            )}
+                          />
+                          <Row label="Withholding tax" value={formatCurrency(stat.tax)} tone="neg" />
+                          <Row label="Tax status" value="S1" />
+                        </Section>
+                      </>
+                    );
+                  })()}
                 </TabsContent>
 
                 {/* History */}

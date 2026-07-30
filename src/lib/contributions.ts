@@ -7,6 +7,8 @@
  * All money is monthly, in whole PHP (matching the rest of the app).
  */
 
+import { formatCurrency } from "@/lib/format";
+
 export const CONTRIBUTION_TYPES = ["SSS", "PhilHealth", "Pag-IBIG", "Tax", "Custom"] as const;
 export type ContributionType = (typeof CONTRIBUTION_TYPES)[number];
 
@@ -116,7 +118,7 @@ export function validateRate(
   if (clash) {
     errors.overlap =
       `Overlaps an existing ${draft.type} range ` +
-      `(${clash.salaryFrom.toLocaleString()}–${clash.salaryTo.toLocaleString()}) ` +
+      `(${formatCurrency(clash.salaryFrom)}–${formatCurrency(clash.salaryTo)}) ` +
       `for ${monthLabel(draft.effectiveMonth)} ${draft.effectiveYear}.`;
   }
 
@@ -293,6 +295,87 @@ export function computeContribution(
     totalContribution: totalEmployee + totalEmployer,
     unmatched,
   };
+}
+
+// ---- Contribution matrix (earnings → contributable base) --------------
+
+/**
+ * The earning types payroll can pay. The Contribution Matrix decides which of
+ * these count toward the base a given contribution is computed against (e.g.
+ * whether overtime is included when deriving the SSS contributable salary).
+ * Codes/labels mirror the payroll register lines.
+ */
+export const EARNING_TYPES = [
+  { code: "cola", label: "Cola", description: "Cost of Living Allowance" },
+  { code: "transAllw", label: "Trans Allowance", description: "Transportation allowance" },
+  { code: "rice", label: "Rice", description: "Rice subsidy" },
+  { code: "holidayPay", label: "Holiday Pay", description: "Regular/special holiday premium" },
+  { code: "thirteenthMonth", label: "13th Month", description: "13th-month pay" },
+  { code: "ps", label: "PS", description: "Productivity / service incentive" },
+  { code: "otherEarnings", label: "Other Earnings", description: "Miscellaneous earnings" },
+  { code: "sickLeave", label: "Sick Leave", description: "Paid sick-leave conversion" },
+  { code: "niteDiff", label: "Nite Diff", description: "Night-shift differential" },
+  { code: "ot125", label: "OT (125%)", description: "Ordinary overtime premium" },
+  { code: "actingAllw", label: "Acting Allw", description: "Acting / officer-in-charge allowance" },
+  { code: "adjustment", label: "Adjustment", description: "Manual earnings adjustment" },
+  { code: "word130", label: "WoRD (130%)", description: "Work on rest day premium" },
+  { code: "ot160", label: "OT (160%)", description: "Rest-day / special-day overtime" },
+  { code: "fourteenthMonth", label: "14th Month", description: "14th-month pay" },
+  { code: "wordOt130", label: "WoRD OT (130%)", description: "Overtime on a rest day" },
+] as const;
+
+export type EarningCode = (typeof EARNING_TYPES)[number]["code"];
+
+/** The four statutory contributions the matrix is configured for. */
+export const MATRIX_TYPES: ContributionType[] = ["Pag-IBIG", "PhilHealth", "SSS", "Tax"];
+
+/** Human display name per contribution type, as shown in the matrix selector. */
+export const CONTRIBUTION_DISPLAY_NAME: Record<ContributionType, string> = {
+  SSS: "SSS (Social Security System)",
+  PhilHealth: "PHILHEALTH (Philhealth)",
+  "Pag-IBIG": "HDMF (Pag-ibig)",
+  Tax: "TAX (BIR Tax)",
+  Custom: "Custom",
+};
+
+/**
+ * Which earning codes are included in the contributable base per contribution
+ * type. A code present in a type's set means "this earning is added to the base
+ * when computing that contribution". Consumed by the payroll engine.
+ */
+export type EarningsMatrix = Record<ContributionType, EarningCode[]>;
+
+/**
+ * Sensible defaults: statutory contributions (SSS/PhilHealth/Pag-IBIG) are
+ * computed on basic pay plus regular allowances, not on premium/overtime lines;
+ * Tax has the widest base (most earnings are taxable) but excludes the tax-exempt
+ * 13th/14th-month lines. Adjust per company policy in the UI.
+ */
+export function defaultEarningsMatrix(): EarningsMatrix {
+  const statutory: EarningCode[] = ["cola", "transAllw", "rice", "ps"];
+  const taxable = EARNING_TYPES
+    .map((e) => e.code)
+    .filter((c) => c !== "thirteenthMonth" && c !== "fourteenthMonth");
+  return {
+    SSS: [...statutory],
+    PhilHealth: [...statutory],
+    "Pag-IBIG": [...statutory],
+    Tax: taxable,
+    Custom: [],
+  };
+}
+
+/** Toggle one earning code for a contribution type, returning a new matrix. */
+export function toggleEarning(
+  matrix: EarningsMatrix,
+  type: ContributionType,
+  code: EarningCode,
+): EarningsMatrix {
+  const current = matrix[type] ?? [];
+  const next = current.includes(code)
+    ? current.filter((c) => c !== code)
+    : [...current, code];
+  return { ...matrix, [type]: next };
 }
 
 // ---- Seed data ---------------------------------------------------------

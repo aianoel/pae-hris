@@ -14,6 +14,7 @@ import { EmployeesPage } from "@/pages/EmployeesPage";
 import { UsersPage } from "@/pages/UsersPage";
 import { DepartmentsPage } from "@/pages/DepartmentsPage";
 import { AttendancePage } from "@/pages/AttendancePage";
+import { LeavePage } from "@/pages/LeavePage";
 import { PayrollPage } from "@/pages/PayrollPage";
 import { PayrollEntryPage } from "@/pages/PayrollEntryPage";
 import { PayrollReportPage } from "@/pages/PayrollReportPage";
@@ -24,17 +25,24 @@ import { SettingsPage } from "@/pages/SettingsPage";
 import { LogsPage } from "@/pages/LogsPage";
 import { RolesPage } from "@/pages/RolesPage";
 import { LoginPage } from "@/components/auth/LoginPage";
+import { ResetPasswordPage } from "@/components/auth/ResetPasswordPage";
 
-/** Guards the app shell — unauthenticated users are bounced to /login. */
+/**
+ * Guards the app shell — unauthenticated users are bounced to /login, and a
+ * password-recovery session is held on the reset screen until a new password is
+ * set (a recovery link must not double as a way into the app).
+ */
 function RequireAuth() {
-  const { user } = useAuth();
+  const { user, recovery } = useAuth();
+  if (recovery) return <ResetPasswordPage />;
   if (!user) return <Navigate to="/login" replace />;
   return <AppLayout />;
 }
 
 /** Keeps authenticated users away from the login screen. */
 function LoginRoute() {
-  const { user } = useAuth();
+  const { user, recovery } = useAuth();
+  if (recovery) return <ResetPasswordPage />;
   if (user) return <Navigate to="/" replace />;
   return <LoginPage />;
 }
@@ -54,6 +62,7 @@ const router = createBrowserRouter([
       { path: "users", element: <RequireAccess><UsersPage /></RequireAccess> },
       { path: "departments", element: <RequireAccess><DepartmentsPage /></RequireAccess> },
       { path: "attendance", element: <RequireAccess><AttendancePage /></RequireAccess> },
+      { path: "leave", element: <RequireAccess><LeavePage /></RequireAccess> },
       { path: "payroll", element: <RequireAccess><PayrollPage /></RequireAccess> },
       { path: "payroll/data-entry", element: <RequireAccess><PayrollEntryPage /></RequireAccess> },
       { path: "payroll/report", element: <RequireAccess><PayrollReportPage /></RequireAccess> },

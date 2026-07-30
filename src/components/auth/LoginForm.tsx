@@ -21,7 +21,7 @@ interface FieldState {
 
 export function LoginForm() {
   const { toast } = useToast();
-  const { login } = useAuth();
+  const { login, sendPasswordReset } = useAuth();
   const navigate = useNavigate();
 
   const [email, setEmail] = React.useState<FieldState>({ value: "", touched: false });
@@ -29,6 +29,7 @@ export function LoginForm() {
   const [showPassword, setShowPassword] = React.useState(false);
   const [remember, setRemember] = React.useState(true);
   const [loading, setLoading] = React.useState(false);
+  const [sendingReset, setSendingReset] = React.useState(false);
   const [shake, setShake] = React.useState(false);
 
   const emailError = validateEmail(email.value);
@@ -72,6 +73,40 @@ export function LoginForm() {
     }
   };
 
+  // Self-service reset: emails a recovery link to whatever is typed in the
+  // email field. The confirmation is deliberately generic — it does not reveal
+  // whether the address has an account (email enumeration).
+  const handleForgot = async () => {
+    setEmail((s) => ({ ...s, touched: true }));
+    if (emailError) {
+      triggerShake();
+      toast({
+        variant: "error",
+        title: "Enter your email first",
+        description: "We'll send the reset link to that address.",
+      });
+      return;
+    }
+
+    setSendingReset(true);
+    const res = await sendPasswordReset(email.value);
+    setSendingReset(false);
+
+    if (res.ok) {
+      toast({
+        variant: "success",
+        title: "Check your email",
+        description: `If an account exists for ${email.value.trim()}, a reset link is on its way.`,
+      });
+    } else {
+      toast({
+        variant: "error",
+        title: "Couldn't send reset link",
+        description: res.error ?? "Please try again in a moment.",
+      });
+    }
+  };
+
   const handleProvider = (provider: "google" | "microsoft") => {
     toast({
       variant: "info",
@@ -98,7 +133,7 @@ export function LoginForm() {
           Welcome back
         </h2>
         <p className="mt-2 text-[0.95rem] text-muted-foreground">
-          Sign in to your Aurora workspace to continue.
+          Sign in to your PAE HRIS workspace to continue.
         </p>
       </div>
 
@@ -170,20 +205,14 @@ export function LoginForm() {
               Remember me
             </Label>
           </div>
-          <a
-            href="#"
-            onClick={(e) => {
-              e.preventDefault();
-              toast({
-                variant: "info",
-                title: "Password reset",
-                description: "We'd email you a reset link in a real app.",
-              });
-            }}
-            className="rounded text-sm font-medium text-primary transition-colors hover:text-primary/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+          <button
+            type="button"
+            onClick={handleForgot}
+            disabled={loading || sendingReset}
+            className="rounded text-sm font-medium text-primary transition-colors hover:text-primary/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-60"
           >
-            Forgot password?
-          </a>
+            {sendingReset ? "Sending…" : "Forgot password?"}
+          </button>
         </div>
 
         <Button

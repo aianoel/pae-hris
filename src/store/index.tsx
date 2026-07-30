@@ -6,7 +6,6 @@ import {
   seedContributionRates,
   computeTotal,
   type ContributionRate,
-  type ContributionType,
 } from "@/lib/contributions";
 import {
   seedLoans,
@@ -14,24 +13,27 @@ import {
   applyPayment,
   type Loan,
 } from "@/lib/loans";
+import {
+  groupByTab,
+  controlFromId,
+  computePerMonth,
+  type LoanEntry,
+} from "@/lib/employeeLoans";
+import { normalizeCode, normalizeAgencies, type LeaveType } from "@/lib/leave";
 import type {
   Employee,
-  EmployeeStatus,
   User,
   Department,
   Agency,
   AttendanceRecord,
-  AttendanceState,
   PayrollRun,
   PayrollApproval,
   Report,
   Document,
   Role,
-  Permission,
   Settings,
   Notification,
   LogEntry,
-  LogType,
 } from "./types";
 import {
   seedUsers,
@@ -54,7 +56,8 @@ import { StoreContext, type StoreValue } from "./store-context";
 // boundary — see the react-context-hmr note.
 export type { StoreValue } from "./store-context";
 import { errorMessage } from "@/lib/utils";
-import { grossPay, COMPONENT_KEYS, type PayrollRow, type PayrollComponents, type PayrollOverrides } from "@/lib/payroll";
+import { grossPay, buildPayrollRows, payrollTotals, COMPONENT_KEYS, setContributionRates as setEngineRates, type PayrollComponents, type PayrollOverrides } from "@/lib/payroll";
+import { ALL_AGENCIES, DIRECT_HIRE } from "@/lib/payrollReports";
 import { isSupabaseConfigured, shouldSeed, supabase } from "@/lib/supabase";
 import { detectDevice, getActiveActor, getActiveActorEmail, getCachedIp, resolvePublicIp } from "@/lib/clientInfo";
 
@@ -106,9 +109,21 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const [contributionRates, setContributionRates] =
     React.useState<ContributionRate[]>(seedContributionRates);
   const [loans, setLoans] = React.useState<Loan[]>(seedLoans);
+  // Leave-type catalogue. Ships empty; HR/Admin populate it (the statutory PH
+  // presets are one click away on the Leave page).
+  const [leaveTypes, setLeaveTypes] = React.useState<LeaveType[]>([]);
+  // Per-employee, tabbed Loans ledger (flat list; grouped per employee for the UI).
+  const [employeeLoanEntries, setEmployeeLoanEntries] = React.useState<LoanEntry[]>([]);
   const [lwopDaysByEmployee, setLwopDaysByEmployee] = React.useState<Record<string, number>>({});
   const [payrollOverrides, setPayrollOverrides] = React.useState<PayrollOverrides>({});
   const [agencies, setAgencies] = React.useState<Agency[]>(DEFAULT_AGENCIES);
+
+  // Feed the configured contribution brackets to the payroll engine so SSS,
+  // PhilHealth, HDMF (Pag-IBIG) and Tax are deducted at the configured rates
+  // everywhere payroll is computed (data-entry grid, register, payslip, NET
+  // 15/30). Done during render rather than in an effect so children reading
+  // derived payroll on this same commit already see the current table.
+  setEngineRates(contributionRates);
 
   // Ready immediately when there's no backend to wait for.
   const [ready, setReady] = React.useState(!isSupabaseConfigured);
@@ -172,7 +187,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           ...data.employees, ...data.users, ...data.departments, ...data.attendance,
           ...data.payrollRuns, ...data.payrollApprovals, ...data.reports,
           ...data.documents, ...data.roles, ...data.notifications, ...data.logs,
-          ...data.contributionRates, ...data.loans,
+          ...data.contributionRates, ...data.loans, ...data.employeeLoanEntries,
+          ...data.leaveTypes,
         ].map((r) => r.id));
 
         // If the backend is empty and seeding is enabled, push the seed data up
@@ -200,6 +216,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           setLogs(data.logs);
           setContributionRates(data.contributionRates);
           setLoans(data.loans);
+          setEmployeeLoanEntries(data.employeeLoanEntries);
+          setLeaveTypes(data.leaveTypes);
         }
       } catch (err) {
         // eslint-disable-next-line no-console
@@ -559,12 +577,21 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         agency === undefined
           ? employees
           : employees.filter((e) => (e.agency ?? "") === agency);
-      const gross = Math.round(scoped.reduce((s, e) => s + e.salary, 0) / 12);
+      // Book the run at what payroll actually computes — every earning line,
+      // the saved data-entry edits and any imported LWOP — not the raw HR
+      // annual salary ÷ 12, which ignored overtime, allowances and edits and so
+      // never matched the register the run was reviewed against. buildPayrollRows
+      // also drops inactive employees, so the headcount is who is really paid.
+      const rows = buildPayrollRows(scoped, lwopDaysByEmployee, payrollOverrides);
+      const gross = Math.round(payrollTotals(rows).gross);
       const scopeNote = agency === undefined ? "" : ` (${agency || "Direct hire"})`;
       const run: PayrollRun = {
         id: nextId("PAY"),
         period,
-        headcount: scoped.length,
+        // Record what this run paid, so the Payroll Report can tell a processed
+        // agency from an unprocessed one instead of unlocking the whole period.
+        agencyScope: agency === undefined ? null : agency,
+        headcount: rows.length,
         gross,
         status: "processing",
         createdAt: new Date().toISOString(),
@@ -580,7 +607,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         persist(() => db.upsertPayrollRun(processed));
       }, 2500);
     },
-    [employees, addLog, persist],
+    [employees, lwopDaysByEmployee, payrollOverrides, addLog, persist],
   );
 
   const markPayrollPaid = React.useCallback<StoreValue["markPayrollPaid"]>(
@@ -623,40 +650,67 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     [addLog, persist],
   );
 
-  // Approve a processed period from the Payroll Report: mark every run for that
-  // period paid (final). No-op if the period has no runs.
+  /**
+   * Which runs an approve/disapprove targets.
+   *
+   * With no agency (or "All Agencies") this is every run in the period, the
+   * original behaviour. With a specific agency it is only the runs booked for
+   * that agency — a whole-company run is deliberately *not* matched, because
+   * acting on it while one agency is on screen would silently approve or
+   * destroy every other agency's payroll for the month.
+   */
+  const runsInScope = React.useCallback(
+    (runs: PayrollRun[], period: string, agency?: string) =>
+      runs.filter((r) => {
+        if (r.period !== period) return false;
+        if (agency === undefined || agency === ALL_AGENCIES) return true;
+        const scope = r.agencyScope ?? null;
+        return agency === DIRECT_HIRE ? scope === "" : scope === agency;
+      }),
+    [],
+  );
+
+  // Approve a processed period from the Payroll Report: mark the in-scope runs
+  // paid (final). No-op if nothing is in scope.
   const approvePayrollPeriod = React.useCallback<StoreValue["approvePayrollPeriod"]>(
-    (period) => {
+    (period, agency) => {
+      let approvedCount = 0;
       setPayrollRuns((prev) => {
+        const targets = new Set(runsInScope(prev, period, agency).map((r) => r.id));
+        approvedCount = targets.size;
         const next = prev.map((r) =>
-          r.period === period ? { ...r, status: "paid" as const } : r,
+          targets.has(r.id) ? { ...r, status: "paid" as const } : r,
         );
         for (const r of next) {
-          if (r.period === period) persist(() => db.upsertPayrollRun(r));
+          if (targets.has(r.id)) persist(() => db.upsertPayrollRun(r));
         }
         return next;
       });
-      addLog("payroll", `approved ${period} payroll`, period);
+      const note = agency && agency !== ALL_AGENCIES ? ` (${agency})` : "";
+      if (approvedCount) addLog("payroll", `approved ${period} payroll${note}`, period);
+      return approvedCount;
     },
-    [addLog, persist],
+    [runsInScope, addLog, persist],
   );
 
-  // Disapprove a processed period: drop its run(s) so isPayrollProcessed goes
-  // false, the report locks, and the period can be re-run. Returns count removed.
+  // Disapprove a processed period: drop the in-scope run(s) so isPayrollProcessed
+  // goes false, the report locks, and it can be re-run. Returns count removed.
   const disapprovePayrollPeriod = React.useCallback<StoreValue["disapprovePayrollPeriod"]>(
-    (period) => {
+    (period, agency) => {
       let removed: PayrollRun[] = [];
       setPayrollRuns((prev) => {
-        removed = prev.filter((r) => r.period === period);
-        return prev.filter((r) => r.period !== period);
+        removed = runsInScope(prev, period, agency);
+        const drop = new Set(removed.map((r) => r.id));
+        return prev.filter((r) => !drop.has(r.id));
       });
       for (const r of removed) persist(() => db.deletePayrollRun(r.id));
       if (removed.length) {
-        addLog("payroll", `disapproved ${period} payroll — run removed`, period);
+        const note = agency && agency !== ALL_AGENCIES ? ` (${agency})` : "";
+        addLog("payroll", `disapproved ${period} payroll${note} — run removed`, period);
       }
       return removed.length;
     },
-    [addLog, persist],
+    [runsInScope, addLog, persist],
   );
 
   const submitPayrollForApproval = React.useCallback<StoreValue["submitPayrollForApproval"]>(
@@ -969,6 +1023,86 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     [addLog, persist, contributionRates],
   );
 
+  // ---- Leave types -------------------------------------------------------
+  // The catalogue of leave categories (Vacation, Sick, …), each scoped to the
+  // agencies it applies to. Creating/editing is gated to HR + Administrator in
+  // the UI (see canManageLeave); the store itself stays unopinionated so the
+  // same actions back any future caller.
+  const addLeaveType = React.useCallback<StoreValue["addLeaveType"]>(
+    (draft) => {
+      const created: LeaveType = {
+        ...draft,
+        name: draft.name.trim(),
+        code: normalizeCode(draft.code),
+        description: draft.description.trim(),
+        agencies: normalizeAgencies(draft.agencies),
+        id: nextId("LVT"),
+        createdAt: new Date().toISOString(),
+      };
+      setLeaveTypes((prev) => [created, ...prev]);
+      persist(() => db.upsertLeaveType(created));
+      addLog("employee", `created leave type "${created.name}" (${created.code})`, created.id);
+      return created;
+    },
+    [addLog, persist],
+  );
+
+  const updateLeaveType = React.useCallback<StoreValue["updateLeaveType"]>(
+    (id, patch) => {
+      let updated: LeaveType | undefined;
+      setLeaveTypes((prev) => {
+        const next = prev.map((t) => {
+          if (t.id !== id) return t;
+          updated = {
+            ...t,
+            ...patch,
+            // Keep the stored form canonical however the caller supplied it.
+            ...(patch.name !== undefined && { name: patch.name.trim() }),
+            ...(patch.code !== undefined && { code: normalizeCode(patch.code) }),
+            ...(patch.agencies !== undefined && { agencies: normalizeAgencies(patch.agencies) }),
+          };
+          return updated;
+        });
+        return next;
+      });
+      if (!updated) return;
+      persist(() => db.upsertLeaveType(updated!));
+      addLog("employee", `updated leave type "${updated.name}"`, id);
+    },
+    [addLog, persist],
+  );
+
+  const removeLeaveType = React.useCallback<StoreValue["removeLeaveType"]>(
+    (id) => {
+      const removed = leaveTypes.find((t) => t.id === id);
+      setLeaveTypes((prev) => prev.filter((t) => t.id !== id));
+      persist(() => db.deleteLeaveType(id));
+      addLog("employee", `deleted leave type "${removed?.name ?? id}"`, id);
+    },
+    [addLog, persist, leaveTypes],
+  );
+
+  const addLeaveTypes = React.useCallback<StoreValue["addLeaveTypes"]>(
+    (drafts) => {
+      const now = new Date().toISOString();
+      const created: LeaveType[] = drafts.map((d) => ({
+        ...d,
+        name: d.name.trim(),
+        code: normalizeCode(d.code),
+        description: d.description.trim(),
+        agencies: normalizeAgencies(d.agencies),
+        id: nextId("LVT"),
+        createdAt: now,
+      }));
+      if (!created.length) return 0;
+      setLeaveTypes((prev) => [...created, ...prev]);
+      persist(() => db.upsertLeaveTypes(created));
+      addLog("employee", `added ${created.length} leave type(s)`);
+      return created.length;
+    },
+    [addLog, persist],
+  );
+
   // ---- Loans -------------------------------------------------------------
   const addLoan = React.useCallback<StoreValue["addLoan"]>(
     (draft) => {
@@ -1048,6 +1182,39 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     [addLog, persist],
   );
 
+  // ---- Employee loan entries (per-employee, tabbed ledger) ---------------
+  const loansForEmployee = React.useCallback<StoreValue["loansForEmployee"]>(
+    (employeeId) => groupByTab(employeeLoanEntries.filter((e) => e.employeeId === employeeId)),
+    [employeeLoanEntries],
+  );
+
+  const addEmployeeLoanEntry = React.useCallback<StoreValue["addEmployeeLoanEntry"]>(
+    (entry) => {
+      const id = nextId("ELN");
+      const created: LoanEntry = {
+        ...entry,
+        id,
+        control: controlFromId(id),
+        // Per-month is always derived from amount ÷ term (whole PHP).
+        perMonth: computePerMonth(entry.amount, entry.term),
+      };
+      setEmployeeLoanEntries((prev) => [created, ...prev]);
+      persist(() => db.upsertEmployeeLoanEntry(created));
+      addLog("payroll", `added ${entry.tab} loan entry`, created.id);
+      return created;
+    },
+    [addLog, persist],
+  );
+
+  const removeEmployeeLoanEntry = React.useCallback<StoreValue["removeEmployeeLoanEntry"]>(
+    (id) => {
+      setEmployeeLoanEntries((prev) => prev.filter((e) => e.id !== id));
+      persist(() => db.deleteEmployeeLoanEntry(id));
+      addLog("payroll", `deleted loan entry`, id);
+    },
+    [addLog, persist],
+  );
+
   const value: StoreValue = {
     employees,
     users,
@@ -1119,6 +1286,15 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     removeLoan,
     importLoans,
     recordLoanPayment,
+    leaveTypes,
+    addLeaveType,
+    updateLeaveType,
+    removeLeaveType,
+    addLeaveTypes,
+    employeeLoanEntries,
+    loansForEmployee,
+    addEmployeeLoanEntry,
+    removeEmployeeLoanEntry,
   };
 
   return <StoreContext.Provider value={value}>{children}</StoreContext.Provider>;

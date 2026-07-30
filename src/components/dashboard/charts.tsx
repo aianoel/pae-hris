@@ -100,9 +100,9 @@ export function PayrollTrendChart() {
       <LineChart data={payrollTrend} margin={{ top: 8, right: 8, left: -12, bottom: 0 }}>
         <CartesianGrid {...gridProps} />
         <XAxis dataKey="month" {...axisProps} />
-        <YAxis {...axisProps} width={40} tickFormatter={(v) => `$${v}M`} />
+        <YAxis {...axisProps} width={48} tickFormatter={(v) => `₱${v}M`} />
         <Tooltip
-          content={<ChartTooltip valueFormatter={(v) => `$${v.toFixed(2)}M`} />}
+          content={<ChartTooltip valueFormatter={(v) => `₱${v.toFixed(2)}M`} />}
           cursor={{ stroke: "hsl(var(--border))" }}
         />
         <Line

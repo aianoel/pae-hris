@@ -1,5 +1,5 @@
 import type { ColumnDef, RowData } from "@tanstack/react-table";
-import { ArrowUpDown, MoreHorizontal, Mail, Copy, Pencil, Trash2 } from "lucide-react";
+import { ArrowUpDown, MoreHorizontal, Mail, Copy, Pencil, Trash2, Wallet } from "lucide-react";
 
 import { Checkbox } from "@/components/ui/checkbox";
 import { Button } from "@/components/ui/button";
@@ -15,6 +15,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import type { Employee } from "@/lib/data";
 import { tenureFrom } from "@/lib/data";
+import { formatCurrency } from "@/lib/format";
 
 // Callbacks the EmployeesPage injects via table `meta` so row actions can reach
 // the store handlers without prop-drilling.
@@ -23,6 +24,7 @@ declare module "@tanstack/react-table" {
   interface TableMeta<TData extends RowData> {
     onEdit?: (employee: Employee) => void;
     onDelete?: (employee: Employee) => void;
+    onLoans?: (employee: Employee) => void;
   }
 }
 
@@ -140,9 +142,9 @@ export const employeeColumns: ColumnDef<Employee>[] = [
     header: "Pay class",
     cell: ({ row }) => {
       const p = row.original.payClass ?? "Tier 1";
-      // Executive band gets the primary tint; the tiers stay neutral.
+      // Confidentials band gets the primary tint; the tiers stay neutral.
       const tone =
-        p === "Executive"
+        p === "Confidentials"
           ? "bg-primary/10 text-primary"
           : "bg-secondary text-secondary-foreground";
       return (
@@ -203,7 +205,7 @@ export const employeeColumns: ColumnDef<Employee>[] = [
     ),
     cell: ({ row }) => (
       <span className="text-sm font-medium tabular-nums">
-        ${row.original.salary.toLocaleString("en-US")}
+        {formatCurrency(row.original.salary)}
       </span>
     ),
   },
@@ -212,7 +214,7 @@ export const employeeColumns: ColumnDef<Employee>[] = [
     enableHiding: false,
     cell: ({ row, table }) => {
       const e = row.original;
-      const { onEdit, onDelete } = table.options.meta ?? {};
+      const { onEdit, onDelete, onLoans } = table.options.meta ?? {};
       return (
         <div className="text-right">
           <DropdownMenu>
@@ -230,6 +232,9 @@ export const employeeColumns: ColumnDef<Employee>[] = [
                 <Mail /> Copy email
               </DropdownMenuItem>
               <DropdownMenuSeparator />
+              <DropdownMenuItem onSelect={() => onLoans?.(e)}>
+                <Wallet /> Loans
+              </DropdownMenuItem>
               <DropdownMenuItem onSelect={() => onEdit?.(e)}>
                 <Pencil /> Edit
               </DropdownMenuItem>

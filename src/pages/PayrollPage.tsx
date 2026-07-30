@@ -28,6 +28,7 @@ import {
   splitIntoHalves,
   PAYROLL_REGISTER_FIELDS,
   ALL_AGENCIES as REPORT_ALL_AGENCIES,
+  ALL_PAY_CLASSES,
   type ReportFilters,
 } from "@/lib/payrollReports";
 import { cn } from "@/lib/utils";
@@ -49,6 +50,9 @@ const statusChip: Record<PayrollStatus, Status> = {
 
 const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
 
+/** 3-letter month codes, in calendar order — the report filters' month format. */
+const MONTH_CODES = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
+
 // Success illustration shown after a run proceeds — an inline SVG data URI
 // (green circle + check) so no asset file is needed.
 const PAYROLL_SUCCESS_IMAGE =
@@ -67,6 +71,8 @@ export function PayrollPage() {
     employees,
     agencies,
     payrollOverrides,
+    lwopDaysByEmployee,
+    contributionRates,
     runPayroll,
     markPayrollPaid,
     disapprovePayrollRun,
@@ -82,10 +88,12 @@ export function PayrollPage() {
 
   // Live headcount per agency scope, recomputed whenever employees/agencies
   // change. Keyed by the option value; "" is the Direct-hire bucket.
+  // Inactive staff aren't paid, so they don't count toward a run's headcount.
   const headcountByOption = React.useMemo(() => {
     const counts = new Map<string, number>();
-    counts.set(ALL_AGENCIES, employees.length);
-    for (const e of employees) {
+    const payable = employees.filter((e) => e.status !== "inactive");
+    counts.set(ALL_AGENCIES, payable.length);
+    for (const e of payable) {
       const key = e.agency || "";
       counts.set(key, (counts.get(key) ?? 0) + 1);
     }
@@ -114,32 +122,45 @@ export function PayrollPage() {
     [headcountByOption],
   );
 
-  // Employees included in the next run given the current agency scope.
+  // Employees included in the next run given the current agency scope. Only
+  // active/on-leave staff are paid, so inactive records are excluded here to
+  // match what the run itself builds — the chip and the run agree.
   const scopedEmployees = React.useMemo(() => {
-    if (agency === ALL_AGENCIES) return employees;
+    const payable = employees.filter((e) => e.status !== "inactive");
+    if (agency === ALL_AGENCIES) return payable;
     const want = agency === DIRECT_HIRE ? "" : agency;
-    return employees.filter((e) => (e.agency ?? "") === want);
+    return payable.filter((e) => (e.agency ?? "") === want);
   }, [employees, agency]);
+
+  // Today, as the calendar month the run is for. Held as a Date so both the
+  // display period ("July 2026") and the report filters ("JUL" / "2026") derive
+  // from one source and can't drift apart.
+  const autoPeriodDate = React.useMemo(() => new Date(), []);
 
   // Per-employee payroll amounts for the review modal — the full Payroll
   // Register column set (same builder the Payroll Report uses), scoped to the
   // selected agency. The report's ALL_AGENCIES sentinel matches this page's.
+  // Every pay class is included: the run pays the whole scope, so previewing a
+  // single class would understate what is about to be disbursed.
   // Paytype is "Full month" so the register shows the whole-month figures; the
   // review then presents them split into 1st-/2nd-half cutoffs below.
   const reviewFilters = React.useMemo<ReportFilters>(
     () => ({
-      year: "2026",
-      month: "JUL",
-      payclass: "Tier 1",
+      // The period under review is the one being run, not a fixed month.
+      year: String(autoPeriodDate.getFullYear()),
+      month: MONTH_CODES[autoPeriodDate.getMonth()],
+      payclass: ALL_PAY_CLASSES,
       paytype: "Full month",
       agency: agency === ALL_AGENCIES ? REPORT_ALL_AGENCIES : agency,
     }),
-    [agency],
+    [agency, autoPeriodDate],
   );
 
   const reviewRows = React.useMemo(
-    () => deptRegister(employees, reviewFilters, payrollOverrides),
-    [employees, reviewFilters, payrollOverrides],
+    () => deptRegister(employees, reviewFilters, payrollOverrides, lwopDaysByEmployee),
+    // contributionRates: the review's deduction lines come from the configured
+    // statutory brackets, so a rate edit must refresh the pre-run figures.
+    [employees, reviewFilters, payrollOverrides, lwopDaysByEmployee, contributionRates],
   );
 
   const reviewTotals = React.useMemo(() => registerTotals(reviewRows), [reviewRows]);
@@ -158,10 +179,10 @@ export function PayrollPage() {
 
   // Auto-detected payroll period from today's date, e.g. "July 2026". This is
   // the period the run defaults to — no manual month picking needed.
-  const autoPeriod = React.useMemo(() => {
-    const now = new Date();
-    return `${MONTHS[now.getMonth()]} ${now.getFullYear()}`;
-  }, []);
+  const autoPeriod = React.useMemo(
+    () => `${MONTHS[autoPeriodDate.getMonth()]} ${autoPeriodDate.getFullYear()}`,
+    [autoPeriodDate],
+  );
 
   // Flag when this agency scope has already been run for the detected period,
   // so the UI can warn before submitting a duplicate.
@@ -300,7 +321,7 @@ export function PayrollPage() {
           <CardContent className="p-5">
             <p className="text-sm text-muted-foreground">Est. monthly gross</p>
             <p className="text-2xl font-semibold tabular-nums text-foreground">
-              {formatCurrency(Math.round(scopedEmployees.reduce((s, e) => s + e.salary, 0) / 12))}
+              {formatCurrency(reviewTotals.gross_earnings ?? 0)}
             </p>
           </CardContent>
         </Card>

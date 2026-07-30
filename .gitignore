@@ -3,7 +3,22 @@ dist
 dist-ssr
 *.local
 .vite
+# TypeScript incremental-build caches: machine-local, and a stale one silently
+# makes `tsc` report success on code that doesn't compile.
+*.tsbuildinfo
 .DS_Store
 .env
 .env.*
 !.env.example
+
+# Local Claude Code settings — contains service_role keys / DB passwords
+.claude/settings.local.json
+
+# Local scratch: feature spec notes, error dumps, UI screenshots
+ERROR.txt
+error*.txt
+contribution.txt
+credentials.txt
+loan.txt
+update.txt
+cred.PNG

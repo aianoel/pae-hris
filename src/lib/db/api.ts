@@ -22,7 +22,9 @@ import type {
   LogEntry,
 } from "@/store/types";
 import type { ContributionRate } from "@/lib/contributions";
+import type { LeaveType } from "@/lib/leave";
 import type { Loan } from "@/lib/loans";
+import type { LoanEntry } from "@/lib/employeeLoans";
 import type { PayrollRow } from "@/lib/payroll";
 import * as M from "./mappers";
 
@@ -42,6 +44,8 @@ export interface AllData {
   logs: LogEntry[];
   contributionRates: ContributionRate[];
   loans: Loan[];
+  employeeLoanEntries: LoanEntry[];
+  leaveTypes: LeaveType[];
 }
 
 /** Fetch a whole table (paged past the 1000-row default cap). */
@@ -79,7 +83,7 @@ export async function loadAll(): Promise<AllData> {
   const [
     employees, users, departments, agencies, attendanceRows, payrollRuns,
     payrollApprovals, reports, documents, roles, settingsRows, notifications,
-    logs, contributionRates, loans,
+    logs, contributionRates, loans, employeeLoanEntries, leaveTypes,
   ] = await Promise.all([
     fetchAll("employees", M.employeeFromRow),
     fetchAll("users", M.userFromRow),
@@ -96,6 +100,8 @@ export async function loadAll(): Promise<AllData> {
     fetchAll("log_entries", M.logFromRow),
     fetchAll("contribution_rates", M.contributionFromRow),
     fetchAllSoft("loans", M.loanFromRow),
+    fetchAllSoft("employee_loan_entries", M.employeeLoanEntryFromRow),
+    fetchAllSoft("leave_types", M.leaveTypeFromRow),
   ]);
 
   const empById = new Map(employees.map((e) => [e.id, e]));
@@ -108,7 +114,7 @@ export async function loadAll(): Promise<AllData> {
     employees, users, departments, agencies, attendance, payrollRuns,
     payrollApprovals, reports, documents, roles,
     settings: settingsRows[0] ?? null,
-    notifications, logs, contributionRates, loans,
+    notifications, logs, contributionRates, loans, employeeLoanEntries, leaveTypes,
   };
 }
 
@@ -223,6 +229,12 @@ export const db = {
     if (error) throw error;
   },
 
+  // Leave types
+  upsertLeaveType: (t: LeaveType) => upsert("leave_types", M.leaveTypeToRow(t)),
+  upsertLeaveTypes: (ts: LeaveType[]) =>
+    upsertMany("leave_types", ts.map(M.leaveTypeToRow)),
+  deleteLeaveType: (id: string) => remove("leave_types", id),
+
   // Loans
   upsertLoan: (l: Loan) => upsert("loans", M.loanToRow(l)),
   deleteLoan: (id: string) => remove("loans", id),
@@ -233,4 +245,11 @@ export const db = {
     const { error } = await sb.from("loans").delete().in("id", ids);
     if (error) throw error;
   },
+
+  // Employee loan entries (per-employee, tabbed ledger)
+  upsertEmployeeLoanEntry: (l: LoanEntry) =>
+    upsert("employee_loan_entries", M.employeeLoanEntryToRow(l)),
+  deleteEmployeeLoanEntry: (id: string) => remove("employee_loan_entries", id),
+  upsertEmployeeLoanEntries: (ls: LoanEntry[]) =>
+    upsertMany("employee_loan_entries", ls.map(M.employeeLoanEntryToRow)),
 };

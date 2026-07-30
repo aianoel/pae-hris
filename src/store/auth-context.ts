@@ -36,6 +36,20 @@ export interface AuthContextValue {
     email: string,
     password: string,
   ) => Promise<{ ok: boolean; error?: string; needsConfirmation?: boolean }>;
+  /**
+   * Email a Supabase password-recovery link to an account. Safe to call from an
+   * admin session: it does not touch the caller's session and never exposes the
+   * target's password. The recipient sets the new password themselves via the
+   * link (which lands back on this app in recovery mode).
+   */
+  sendPasswordReset: (email: string) => Promise<{ ok: boolean; error?: string }>;
+  /**
+   * True while a Supabase recovery link is being consumed — the app must show
+   * the "set a new password" screen instead of the normal shell.
+   */
+  recovery: boolean;
+  /** Commit the new password for the active recovery session. */
+  completePasswordReset: (password: string) => Promise<{ ok: boolean; error?: string }>;
 }
 
 export const AuthContext = React.createContext<AuthContextValue | null>(null);

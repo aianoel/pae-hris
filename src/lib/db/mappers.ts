@@ -19,7 +19,9 @@ import type {
   LogEntry,
 } from "@/store/types";
 import type { ContributionRate } from "@/lib/contributions";
+import type { LeaveType } from "@/lib/leave";
 import type { Loan } from "@/lib/loans";
+import type { LoanEntry, LoanTabKey } from "@/lib/employeeLoans";
 import type { PayrollRow } from "@/lib/payroll";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -40,6 +42,20 @@ export const employeeFromRow = (r: any): Employee => ({
   agency: r.agency ?? undefined,
   bioId: r.bio_id ?? undefined,
   avatar: r.avatar ?? undefined,
+  // Credential information (statutory PH IDs)
+  sss: r.sss ?? undefined,
+  philhealth: r.philhealth ?? undefined,
+  pagibig: r.pagibig ?? undefined,
+  tin: r.tin ?? undefined,
+  // Other credentials
+  passport: r.passport ?? undefined,
+  licence: r.licence ?? undefined,
+  licenceExpiry:
+    typeof r.licence_expiry === "string" ? r.licence_expiry.slice(0, 10) : r.licence_expiry ?? undefined,
+  bankName: r.bank_name ?? undefined,
+  bankAccount: r.bank_account ?? undefined,
+  otherIdName: r.other_id_name ?? undefined,
+  otherIdNumber: r.other_id_number ?? undefined,
 });
 export const employeeToRow = (e: Partial<Employee>): Record<string, unknown> => ({
   ...(e.id !== undefined && { id: e.id }),
@@ -56,6 +72,20 @@ export const employeeToRow = (e: Partial<Employee>): Record<string, unknown> => 
   ...(e.agency !== undefined && { agency: e.agency ?? null }),
   ...(e.bioId !== undefined && { bio_id: e.bioId }),
   ...(e.avatar !== undefined && { avatar: e.avatar }),
+  // Credentials are always written, unlike the fields above: the form clears a
+  // credential by dropping the key, so an omit-when-undefined spread would let
+  // the stale column value survive the upsert. Absent/empty maps to NULL.
+  sss: e.sss || null,
+  philhealth: e.philhealth || null,
+  pagibig: e.pagibig || null,
+  tin: e.tin || null,
+  passport: e.passport || null,
+  licence: e.licence || null,
+  licence_expiry: e.licenceExpiry || null,
+  bank_name: e.bankName || null,
+  bank_account: e.bankAccount || null,
+  other_id_name: e.otherIdName || null,
+  other_id_number: e.otherIdNumber || null,
 });
 
 // ---- Users ----------------------------------------------------------------
@@ -134,6 +164,9 @@ export const attendanceToRow = (a: Partial<AttendanceRecord>): Record<string, un
 export const payrollRunFromRow = (r: any): PayrollRun => ({
   id: r.id,
   period: r.period,
+  // null stays null (= whole-company run); "" is a real value (= direct hires),
+  // so it must not be collapsed to null by a `??`.
+  agencyScope: r.agency_scope ?? null,
   headcount: Number(r.headcount),
   gross: Number(r.gross),
   status: r.status,
@@ -142,6 +175,7 @@ export const payrollRunFromRow = (r: any): PayrollRun => ({
 export const payrollRunToRow = (p: Partial<PayrollRun>): Record<string, unknown> => ({
   ...(p.id !== undefined && { id: p.id }),
   ...(p.period !== undefined && { period: p.period }),
+  ...(p.agencyScope !== undefined && { agency_scope: p.agencyScope }),
   ...(p.headcount !== undefined && { headcount: p.headcount }),
   ...(p.gross !== undefined && { gross: p.gross }),
   ...(p.status !== undefined && { status: p.status }),
@@ -349,6 +383,35 @@ export const contributionToRow = (c: Partial<ContributionRate>): Record<string, 
   ...(c.status !== undefined && { status: c.status }),
 });
 
+// ---- Leave types ----------------------------------------------------------
+export const leaveTypeFromRow = (r: any): LeaveType => ({
+  id: r.id,
+  name: r.name,
+  code: r.code,
+  description: r.description ?? "",
+  daysPerYear: Number(r.days_per_year),
+  payRule: r.pay_rule,
+  // Stored as a text[]; tolerate a null column on a partially-migrated backend.
+  agencies: Array.isArray(r.agencies) ? r.agencies : [],
+  carryOver: Boolean(r.carry_over),
+  requiresApproval: Boolean(r.requires_approval),
+  status: r.status,
+  createdAt: r.created_at,
+});
+export const leaveTypeToRow = (t: Partial<LeaveType>): Record<string, unknown> => ({
+  ...(t.id !== undefined && { id: t.id }),
+  ...(t.name !== undefined && { name: t.name }),
+  ...(t.code !== undefined && { code: t.code }),
+  ...(t.description !== undefined && { description: t.description }),
+  ...(t.daysPerYear !== undefined && { days_per_year: t.daysPerYear }),
+  ...(t.payRule !== undefined && { pay_rule: t.payRule }),
+  ...(t.agencies !== undefined && { agencies: t.agencies }),
+  ...(t.carryOver !== undefined && { carry_over: t.carryOver }),
+  ...(t.requiresApproval !== undefined && { requires_approval: t.requiresApproval }),
+  ...(t.status !== undefined && { status: t.status }),
+  ...(t.createdAt !== undefined && { created_at: t.createdAt }),
+});
+
 // ---- Loans ----------------------------------------------------------------
 export const loanFromRow = (r: any): Loan => ({
   id: r.id,
@@ -377,4 +440,30 @@ export const loanToRow = (l: Partial<Loan>): Record<string, unknown> => ({
   ...(l.amountPaid !== undefined && { amount_paid: l.amountPaid }),
   ...(l.startDate !== undefined && { start_date: l.startDate }),
   ...(l.status !== undefined && { status: l.status }),
+});
+
+// ---- Employee loan entries (per-employee, tabbed ledger) ------------------
+export const employeeLoanEntryFromRow = (r: any): LoanEntry => ({
+  id: r.id,
+  employeeId: r.employee_id,
+  tab: r.tab as LoanTabKey,
+  amount: Number(r.amount),
+  term: r.term ?? "",
+  perMonth: Number(r.per_month),
+  type: r.type ?? "",
+  date: typeof r.entry_date === "string" ? r.entry_date.slice(0, 10) : r.entry_date,
+  control: r.control ?? "",
+  paid: Number(r.paid),
+});
+export const employeeLoanEntryToRow = (l: Partial<LoanEntry>): Record<string, unknown> => ({
+  ...(l.id !== undefined && { id: l.id }),
+  ...(l.employeeId !== undefined && { employee_id: l.employeeId }),
+  ...(l.tab !== undefined && { tab: l.tab }),
+  ...(l.amount !== undefined && { amount: l.amount }),
+  ...(l.term !== undefined && { term: l.term }),
+  ...(l.perMonth !== undefined && { per_month: l.perMonth }),
+  ...(l.type !== undefined && { type: l.type }),
+  ...(l.date !== undefined && { entry_date: l.date }),
+  ...(l.control !== undefined && { control: l.control }),
+  ...(l.paid !== undefined && { paid: l.paid }),
 });

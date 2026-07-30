@@ -11,31 +11,18 @@ import type { Employee } from "@/store/types";
 import {
   buildPayrollRows,
   statutoryBreakdown,
+  ancillaryFor,
+  carve,
+  hourlyRate,
+  seeded,
+  employeeSeed,
+  WORKING_DAYS_PER_YEAR,
+  dailyRateFromMonthly,
   type PayrollRow,
   type PayrollOverrides,
 } from "@/lib/payroll";
 
-// Deterministic pseudo-random from an index — mirrors src/lib/payroll.ts so
-// derived deductions stay stable and reproducible.
-function seeded(i: number, mod: number) {
-  return (i * 2654435761) % mod;
-}
-
-/** Monthly HMO premium (employee share) by employment type, in whole PHP. */
-const HMO_BY_TYPE: Record<PayrollRow["employeeType"], number> = {
-  Regular: 350,
-  Probationary: 250,
-  Contractual: 0,
-  "Part-time": 0,
-};
-
-/** Paid working days per year used for the daily-rate divisor (LWOP). */
-export const WORKING_DAYS_PER_YEAR = 261;
-
-/** Daily rate from a monthly rate: (Monthly × 12) / 261. */
-export function dailyRateFromMonthly(monthlyRate: number): number {
-  return (monthlyRate * 12) / WORKING_DAYS_PER_YEAR;
-}
+export { WORKING_DAYS_PER_YEAR, dailyRateFromMonthly };
 
 /**
  * Leave-without-pay deduction = Daily Rate × LWOP Days, where
@@ -43,30 +30,6 @@ export function dailyRateFromMonthly(monthlyRate: number): number {
  */
 export function lwopDeduction(monthlyRate: number, lwopDays: number): number {
   return Math.round(dailyRateFromMonthly(monthlyRate) * lwopDays * 100) / 100;
-}
-
-/**
- * Loan amortisations, HMO and leave-without-pay are not stored on the payroll
- * row, so we synthesise them deterministically per employee — occasional
- * fixed amortisations plus a type-based HMO premium and seeded LWOP days.
- */
-function derivedDeductions(row: PayrollRow, i: number) {
-  const s = (n: number, mod: number) => seeded(i + n, mod);
-
-  // Seeded whole LWOP days this period (mostly 0); deduction uses the
-  // 261-working-day daily rate: ((Monthly × 12) / 261) × LWOP Days.
-  const lwopDays = s(24, 7) === 0 ? 1 + s(25, 3) : 0; // 0, or 1–3 days
-  const lwop = lwopDeduction(row.basic, lwopDays);
-
-  return {
-    sssLoan: s(21, 8) === 0 ? 850 : 0,
-    pagIbigLoan: s(22, 10) === 0 ? 600 : 0,
-    coopLoan: s(23, 6) === 0 ? 1200 : 0,
-    hmo: HMO_BY_TYPE[row.employeeType],
-    // LWOP is unpaid leave, distinct from unplanned absences already on the row.
-    lwopDays,
-    lwop,
-  };
 }
 
 /** Agency filter sentinels shared by the payroll data-entry and report screens. */
@@ -84,6 +47,58 @@ export function agencyFilterOptions(employees: Employee[]): string[] {
 }
 
 /**
+ * Letterhead for a printed report, resolved from the agency filter selection.
+ *
+ * Only a specific agency brands a printout: the `ALL_AGENCIES` and
+ * `DIRECT_HIRE` sentinels aren't agencies, so those printouts stay unbranded
+ * rather than picking an arbitrary logo. A selected agency always brands the
+ * report by name — the logo is added when one has been uploaded under
+ * Settings → Agencies, and omitted otherwise.
+ */
+export function reportBrandFor(
+  agency: string,
+  agencies: { name: string; logo?: string }[],
+): { name: string; logo?: string } | undefined {
+  if (agency === ALL_AGENCIES || agency === DIRECT_HIRE) return undefined;
+  const match = agencies.find((a) => a.name === agency);
+  // An agency an employee is assigned to may not be formally registered; brand
+  // by name anyway so the printout is still attributed.
+  return { name: agency, logo: match?.logo };
+}
+
+/**
+ * Letterhead inferred from the employees a report actually covers, for the tabs
+ * that have no agency filter (Payslip, NET 15, NET 15/30).
+ *
+ * The rule is deliberately strict: brand the printout only when *every*
+ * reported employee belongs to the same agency, since that is the only case
+ * where a single logo speaks for the whole page. A report mixing agencies — or
+ * one covering direct hires, who have no agency — stays unbranded rather than
+ * stamping one agency's logo over another's figures.
+ *
+ * `employeeIds` are the ids on the report; agencies are read from the HR
+ * records so this works for any row shape.
+ */
+export function autoReportBrand(
+  employeeIds: string[],
+  employees: Employee[],
+  agencies: { name: string; logo?: string }[],
+): { name: string; logo?: string } | undefined {
+  if (!employeeIds.length) return undefined;
+  const agencyById = new Map(employees.map((e) => [e.id, e.agency ?? ""]));
+
+  let sole: string | undefined;
+  for (const id of employeeIds) {
+    const agency = agencyById.get(id) ?? "";
+    if (!agency) return undefined; // a direct hire on the page — no single owner
+    if (sole === undefined) sole = agency;
+    else if (sole !== agency) return undefined; // mixed agencies — can't brand
+  }
+
+  return sole ? reportBrandFor(sole, agencies) : undefined;
+}
+
+/**
  * Keep only the payroll rows matching an agency selection. The `ALL_AGENCIES`
  * sentinel passes everyone through; `DIRECT_HIRE` keeps rows with no agency.
  */
@@ -91,6 +106,57 @@ export function filterRowsByAgency(rows: PayrollRow[], agency: string): PayrollR
   if (agency === ALL_AGENCIES) return rows;
   if (agency === DIRECT_HIRE) return rows.filter((r) => !r.agency);
   return rows.filter((r) => r.agency === agency);
+}
+
+/**
+ * Drop rows belonging to an agency that has no payroll run for the period.
+ *
+ * This is what the combined `ALL_AGENCIES` view needs: reporting every employee
+ * as soon as *any* agency is processed would show figures for staff who were
+ * never actually run. A whole-company run (`agencyScope` null) covers everyone,
+ * so in that case nothing is dropped.
+ *
+ * `periodRuns` must already be narrowed to the reported period.
+ */
+export function filterRowsByProcessedRuns(
+  rows: PayrollRow[],
+  periodRuns: ProcessedRun[],
+): PayrollRow[] {
+  // A whole-company run pays everyone — no need to look at individual scopes.
+  if (periodRuns.some((r) => (r.agencyScope ?? null) === null)) return rows;
+  const paidScopes = new Set(periodRuns.map((r) => r.agencyScope as string));
+  return rows.filter((r) => paidScopes.has(r.agency ?? ""));
+}
+
+/** The payroll runs booked for a report's month/year. */
+export function runsForPeriod<T extends ProcessedRun>(
+  payrollRuns: T[],
+  month: string,
+  year: string,
+): T[] {
+  const period = periodForFilters(month, year);
+  return payrollRuns.filter((r) => r.period === period);
+}
+
+/** Default pay class for an employee with none set (matches the UI convention). */
+const DEFAULT_PAY_CLASS = "Tier 1";
+
+/**
+ * Sentinel that scopes a query to every pay class. Used by the pre-run review,
+ * which must preview the whole batch a run will pay rather than a single class.
+ */
+export const ALL_PAY_CLASSES = "All Pay Classes";
+
+/**
+ * Keep only the employees registered in the selected pay class. An employee
+ * with no pay class set is treated as the default ({@link DEFAULT_PAY_CLASS}),
+ * mirroring how the employees table displays it. Returns an empty list when no
+ * employee belongs to the class, so the register table shows no rows. The
+ * {@link ALL_PAY_CLASSES} sentinel passes everyone through.
+ */
+export function filterByPayClass(employees: Employee[], payclass: string): Employee[] {
+  if (payclass === ALL_PAY_CLASSES) return employees;
+  return employees.filter((e) => (e.payClass ?? DEFAULT_PAY_CLASS) === payclass);
 }
 
 /**
@@ -131,18 +197,90 @@ export function periodForFilters(month: string, year: string): string {
   return `${MONTH_CODE_TO_NAME[month] ?? month} ${year}`;
 }
 
+/** A payroll run as far as the "has this been processed?" checks are concerned. */
+export interface ProcessedRun {
+  period: string;
+  /** null/undefined = whole company, "" = direct hires, else an agency name. */
+  agencyScope?: string | null;
+}
+
+/**
+ * Whether a run covers the given agency selection.
+ *
+ * A whole-company run (`agencyScope` null/undefined) pays everyone, so it
+ * satisfies any agency. A scoped run only satisfies its own agency — this is
+ * what stops processing one agency from unlocking the rest. The `ALL_AGENCIES`
+ * view shows the combined figures, so any run at all is enough for it.
+ */
+export function runCoversAgency(run: ProcessedRun, agency: string): boolean {
+  const scope = run.agencyScope ?? null;
+  if (scope === null) return true; // whole-company run — covers everyone
+  if (agency === ALL_AGENCIES) return true; // combined view — any run will do
+  if (agency === DIRECT_HIRE) return scope === "";
+  return scope === agency;
+}
+
 /**
  * Whether payroll has been processed for the given month/year — i.e. a payroll
  * run exists for the matching period. `month` is a 3-letter code ("JUL").
+ *
+ * Pass `agency` to ask the narrower question the report tabs actually need:
+ * *has this agency been processed for this period?* Without it the check stays
+ * period-wide (the shared header's behaviour).
  */
 export function isPayrollProcessed(
-  payrollRuns: { period: string }[],
+  payrollRuns: ProcessedRun[],
   month: string,
   year: string,
+  agency: string = ALL_AGENCIES,
 ): boolean {
   const period = periodForFilters(month, year);
-  return payrollRuns.some((r) => r.period === period);
+  return payrollRuns.some((r) => r.period === period && runCoversAgency(r, agency));
 }
+
+/** Full month name → 3-letter code, the inverse of MONTH_CODE_TO_NAME. */
+const MONTH_NAME_TO_CODE: Record<string, string> = Object.fromEntries(
+  Object.entries(MONTH_CODE_TO_NAME).map(([code, name]) => [name, code]),
+);
+
+/**
+ * Split a payroll-run period string ("July 2026") back into the report filters'
+ * `{ month, year }` shape ("JUL" / "2026"). Returns null when the string isn't
+ * a recognised "<Month> <Year>" pair.
+ */
+export function filtersForPeriod(period: string): { month: string; year: string } | null {
+  const [name, year] = period.trim().split(/\s+/);
+  const month = MONTH_NAME_TO_CODE[name];
+  if (!month || !/^\d{4}$/.test(year ?? "")) return null;
+  return { month, year };
+}
+
+/**
+ * The most recent period that actually has a payroll run, as report filters.
+ * Used to open the report on real data instead of a hardcoded month: runs are
+ * sorted chronologically and the latest recognised one wins. Returns null when
+ * no run has been processed yet, so callers can fall back to a default.
+ */
+export function latestProcessedPeriod(
+  payrollRuns: { period: string }[],
+): { month: string; year: string } | null {
+  let best: { month: string; year: string; rank: number } | null = null;
+  for (const run of payrollRuns) {
+    const parsed = filtersForPeriod(run.period);
+    if (!parsed) continue;
+    // Rank as YYYYMM so the newest period sorts highest.
+    const monthIndex = MONTHS_ORDER.indexOf(parsed.month);
+    const rank = Number(parsed.year) * 100 + monthIndex;
+    if (!best || rank > best.rank) best = { ...parsed, rank };
+  }
+  return best ? { month: best.month, year: best.year } : null;
+}
+
+/** Month codes in calendar order — used to rank periods chronologically. */
+const MONTHS_ORDER = [
+  "JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+  "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
+];
 
 /** A column in one of the dept-grouped register tables. */
 export interface RegisterField {
@@ -177,6 +315,7 @@ export const REGISTER_NUMERIC_KEYS = [
   // Deductions
   "sss_cont",
   "sss_loan",
+  "phic_cont",
   "hdmf_cont",
   "hdmf_loan",
   "pecewa_loan",
@@ -209,6 +348,7 @@ export const PAYROLL_REGISTER_FIELDS: RegisterField[] = [
   { key: "total_net", label: "TOTAL NET" },
   { key: "sss_cont", label: "SSS CONT" },
   { key: "sss_loan", label: "SSS LOAN" },
+  { key: "phic_cont", label: "PHIC CONT" },
   { key: "hdmf_cont", label: "HDMF CONT" },
   { key: "hdmf_loan", label: "HDMF LOAN" },
   { key: "pecewa_loan", label: "PECEWA LOAN" },
@@ -240,6 +380,7 @@ export const EARNING_REGISTER_FIELDS: RegisterField[] = [
 export const DEDUCTION_REGISTER_FIELDS: RegisterField[] = [
   { key: "sss_cont", label: "SSS CONT", code: "256" },
   { key: "sss_loan", label: "SSS LOAN", code: "262" },
+  { key: "phic_cont", label: "PHIC CONT", code: "257" },
   { key: "hdmf_cont", label: "HDMF CONT", code: "260/408/261" },
   { key: "hdmf_loan", label: "HDMF LOAN", code: "274" },
   { key: "pecewa_loan", label: "PECEWA LOAN", code: "264" },
@@ -254,46 +395,80 @@ export const DEDUCTION_REGISTER_FIELDS: RegisterField[] = [
   { key: "base_tax", label: "BASE TAX", code: "245" },
 ];
 
-/** Build one per-employee register row, itemising every earning/deduction. */
-function deptRegisterRow(row: PayrollRow, i: number): DeptRegisterRow {
-  const s = (n: number, mod: number) => seeded(i + n, mod);
+/**
+ * Build one per-employee register row, itemising every earning/deduction.
+ *
+ * The itemised lines are *carved out of* the payroll row's roll-ups rather than
+ * synthesised again here. That is what makes the register agree with the
+ * data-entry grid: GROSS EARNINGS equals the grid's gross and TOTAL DEDN equals
+ * the grid's deductions, to the peso, including any hand-edited amount. A
+ * roll-up edited above its derived parts surfaces the surplus on the OTHERADD /
+ * OTHER DEDN line; edited below, the parts scale down proportionally.
+ */
+function deptRegisterRow(row: PayrollRow): DeptRegisterRow {
   const stat = statutoryBreakdown(row.basic);
-  const d = derivedDeductions(row, i);
+  const a = ancillaryFor(row);
 
-  // ---- Earnings — split the lumped allowance into itemised lines ----
+  // ---- Earnings — carve the lumped allowance into its itemised lines ----
   const basic_rate = row.basic;
-  const cola = 1500; // fixed cost-of-living allowance
-  const trans_allw = row.allowances; // de-minimis transport allowance
-  const rice_subsi = 2000; // statutory rice subsidy
+  const allw = carve(row.allowances, [a.transportAllowance, a.cola, a.riceSubsidy]);
+  const [trans_allw, cola, rice_subsi] = allw.parts;
   const holiday_pay = row.holidayPay;
   const nite_diff = row.nightDiff;
   const ot_pay = row.overtime;
-  const acting_allw = s(51, 8) === 0 ? Math.round(row.basic * 0.05) : 0;
-  const otheradd = row.adjustments + row.bonuses + row.commissions + row.otherEarnings;
+  // The acting allowance is carried inside `adjustments`; anything on top of it
+  // (plus bonuses/commissions/other) lands on OTHERADD.
+  const adj = carve(row.adjustments, [a.actingAllowance]);
+  const [acting_allw] = adj.parts;
+  const otheradd =
+    adj.remainder +
+    allw.remainder +
+    row.bonuses +
+    row.commissions +
+    row.otherEarnings;
 
+  // Equals grossPay(row) by construction — every earning is accounted for once.
   const gross_earnings =
     basic_rate + cola + trans_allw + rice_subsi + holiday_pay + nite_diff + ot_pay + acting_allw + otheradd;
 
   // ---- Deductions ----
-  const sss_cont = stat.sss;
-  const sss_loan = d.sssLoan;
-  const hdmf_cont = stat.pagIbig; // Pag-IBIG/HDMF contribution
-  const hdmf_loan = d.pagIbigLoan;
-  const pecewa_loan = s(52, 9) === 0 ? 500 : 0;
-  const coop_loan = d.coopLoan;
-  const pagibig_ad = s(53, 7) === 0 ? 300 : 0; // Pag-IBIG additional
-  const other_dedn = row.otherDeductions + row.cashAdvance;
-  const hmo_dedn = d.hmo;
-  const ded_a = s(54, 10) === 0 ? 250 : 0;
-  const electric_bill = s(55, 6) === 0 ? 450 : 0;
-  const mem_ins = 100; // fixed membership insurance
-  const lwop = d.lwop;
-  const base_tax = stat.tax;
+  // Statutory contributions come from `statutoryBreakdown`, which reads the
+  // brackets configured under Contributions (SSS / PhilHealth / Pag-IBIG / Tax)
+  // and falls back to the built-in formulas for any type with no active bracket.
+  // They are carved out of govDeductions so an edited roll-up still reconciles.
+  const gov = carve(row.govDeductions, [stat.sss, stat.philHealth, stat.pagIbig, stat.tax]);
+  const [sss_cont, phic_cont, hdmf_cont, base_tax] = gov.parts;
 
-  // Total deductions sums every itemised line so the register reconciles.
+  // Loan lines carved out of the row's `loans` roll-up.
+  const loan = carve(row.loans, [a.sssLoan, a.hdmfLoan, a.pecewaLoan, a.coopLoan, a.pagibigAd]);
+  const [sss_loan, hdmf_loan, pecewa_loan, coop_loan, pagibig_ad] = loan.parts;
+
+  // Other-deduction lines carved out of the row's `otherDeductions` roll-up.
+  const other = carve(row.otherDeductions, [a.hmo, a.dedA, a.electricBill, a.memIns]);
+  const [hmo_dedn, ded_a, electric_bill, mem_ins] = other.parts;
+
+  // LWOP is unpaid leave, distinct from the unplanned absences on the row. It
+  // comes straight from the row so a biometric import (or a hand-edited LWOP
+  // day count) is the number the register deducts.
+  const lwop = row.lwop;
+
+  // Everything not itemised above — cash advance, late, undertime, absences —
+  // plus any surplus left over from the carved roll-ups.
+  const other_dedn =
+    row.cashAdvance +
+    row.late +
+    row.undertime +
+    row.absences +
+    gov.remainder +
+    loan.remainder +
+    other.remainder;
+
+  // Total deductions sums every itemised line so the register reconciles; this
+  // equals totalDeductions(row) by construction.
   const total_dedn =
     sss_cont +
     sss_loan +
+    phic_cont +
     hdmf_cont +
     hdmf_loan +
     pecewa_loan +
@@ -326,6 +501,7 @@ function deptRegisterRow(row: PayrollRow, i: number): DeptRegisterRow {
     total_net,
     sss_cont,
     sss_loan,
+    phic_cont,
     hdmf_cont,
     hdmf_loan,
     pecewa_loan,
@@ -365,35 +541,147 @@ export function splitIntoHalves(whole: number): { first: number; second: number 
   return { first, second };
 }
 
-/** Scale every numeric field of a register row by `factor` (rounded to whole
- *  PHP), leaving the identity fields (dept/employee) untouched. */
-function scaleRegisterRow(row: DeptRegisterRow, factor: number): DeptRegisterRow {
-  if (factor === 1) return row;
+/**
+ * Loan-deduction lines on the register. These follow the pay-class cutoff rule
+ * (see `loanFactorForHalf`) instead of the even ½/½ split every other line uses.
+ */
+const LOAN_KEYS: RegisterNumericKey[] = [
+  "sss_loan",
+  "hdmf_loan",
+  "pecewa_loan",
+  "coop_loan",
+  "pagibig_ad",
+];
+
+/** The earning lines summed into `gross_earnings` — used to re-reconcile a split row. */
+const EARNING_KEYS: RegisterNumericKey[] = [
+  "basic_rate",
+  "cola",
+  "trans_allw",
+  "rice_subsi",
+  "holiday_pay",
+  "nite_diff",
+  "ot_pay",
+  "acting_allw",
+  "otheradd",
+];
+
+/** The deduction lines summed into `total_dedn` — used to re-reconcile a split row. */
+const DEDN_KEYS: RegisterNumericKey[] = [
+  "sss_cont",
+  "sss_loan",
+  "phic_cont",
+  "hdmf_cont",
+  "hdmf_loan",
+  "pecewa_loan",
+  "coop_loan",
+  "pagibig_ad",
+  "other_dedn",
+  "hmo_dedn",
+  "ded_a",
+  "electric_bill",
+  "mem_ins",
+  "lwop",
+  "base_tax",
+];
+
+/**
+ * Fraction of a whole-month LOAN amount collected in the given cutoff half,
+ * keyed on the employee's pay class:
+ *
+ *  - **Confidentials** — the full loan is taken once, in the **1st half**
+ *    (a one-time deduction); the 2nd half collects nothing.
+ *  - **Rank And File** (and every other class) — the loan is **split evenly**
+ *    across both halves.
+ *
+ * `paytype` is "1st half" / "2nd half" / "Full month" (case-insensitive).
+ */
+export function loanFactorForHalf(paytype: string, payClass: string): number {
+  const p = paytype.trim().toLowerCase();
+  if (p !== "1st half" && p !== "2nd half") return 1; // full month
+  if (payClass === "Confidentials") return p === "1st half" ? 1 : 0;
+  return 0.5;
+}
+
+/**
+ * Scale a register row for the selected cutoff. Ordinary lines split evenly by
+ * `factor` (½ for either half, 1 for full month); loan lines instead follow the
+ * pay-class rule via `loanFactorForHalf`. The deduction roll-up and net are then
+ * recomputed from the scaled lines so the row still reconciles.
+ */
+function scaleRegisterRow(
+  row: DeptRegisterRow,
+  factor: number,
+  paytype: string,
+  payClass: string,
+): DeptRegisterRow {
+  const loanFactor = loanFactorForHalf(paytype, payClass);
+  // Nothing to do when both the ordinary split and the loan split are identity.
+  if (factor === 1 && loanFactor === 1) return row;
+
+  // The 2nd half takes the remainder of every ½ split, so first + second always
+  // adds back to the whole month. Rounding each half independently would leak a
+  // peso per line per employee — visible as NET 15 + NET 30 ≠ TOTAL NET.
+  const isSecond = paytype.trim().toLowerCase() === "2nd half";
+  const half = (whole: number) => {
+    const first = Math.round(whole / 2);
+    return isSecond ? whole - first : first;
+  };
+  const split = (whole: number, f: number) =>
+    f === 1 ? whole : f === 0 ? 0 : f === 0.5 ? half(whole) : Math.round(whole * f);
+
   const scaled = { ...row };
-  for (const key of REGISTER_NUMERIC_KEYS) scaled[key] = Math.round(row[key] * factor);
+  const loanSet = new Set<RegisterNumericKey>(LOAN_KEYS);
+  for (const key of REGISTER_NUMERIC_KEYS) {
+    if (key === "gross_earnings" || key === "total_dedn" || key === "total_net") continue;
+    scaled[key] = split(row[key], loanSet.has(key) ? loanFactor : factor);
+  }
+
+  // Re-reconcile the roll-ups from the scaled component lines so the row still
+  // balances: gross is the sum of the scaled earning lines (not the whole-month
+  // gross re-scaled, which can disagree by a peso), and net follows from it.
+  scaled.gross_earnings = EARNING_KEYS.reduce((sum, k) => sum + scaled[k], 0);
+  scaled.total_dedn = DEDN_KEYS.reduce((sum, k) => sum + scaled[k], 0);
+  scaled.total_net = scaled.gross_earnings - scaled.total_dedn;
   return scaled;
 }
 
 /**
- * Build the per-employee register for the given filters. The filter selection
- * perturbs the seed (as with the Overtime Register) so different
- * Year/Month/Payclass/Paytype combinations return plausibly different data —
- * standing in for the AJAX GET against the real payroll tables. The Paytype
- * filter additionally splits the whole-month amounts: 1st/2nd half each pay ½.
+ * Build the per-employee register for the given filters.
+ *
+ * Figures come from the payroll engine, keyed on each employee's own record —
+ * the same numbers the data-entry grid shows. The Year/Month filters scope
+ * *which* period is reported, not what the amounts are, so re-querying the same
+ * period always returns the same money. The Paytype filter splits the
+ * whole-month amounts: 1st/2nd half each pay ½.
+ *
+ * `lwopDaysByEmployee` (from a biometric attendance import) flows through to
+ * the LWOP line, so imported unpaid days are deducted on the register too.
  */
 export function deptRegister(
   employees: Employee[],
   filters: ReportFilters,
   overrides: PayrollOverrides = {},
+  lwopDaysByEmployee: Record<string, number> = {},
+  /**
+   * The period's payroll runs. When given, employees whose agency has no run
+   * are excluded, so the combined "All Agencies" view only reports staff that
+   * payroll actually processed. Omit to report every employee (legacy callers).
+   */
+  periodRuns?: ProcessedRun[],
 ): DeptRegisterRow[] {
-  const salt =
-    Number(filters.year) +
-    filters.month.length * 7 +
-    filters.payclass.length * 13 +
-    filters.paytype.length * 17;
   const factor = payTypeFactor(filters.paytype);
-  const rows = filterRowsByAgency(buildPayrollRows(employees, {}, overrides), filters.agency);
-  return rows.map((row, idx) => scaleRegisterRow(deptRegisterRow(row, idx + salt), factor));
+  const inClass = filterByPayClass(employees, filters.payclass);
+  let rows = filterRowsByAgency(
+    buildPayrollRows(inClass, lwopDaysByEmployee, overrides),
+    filters.agency,
+  );
+  if (periodRuns) rows = filterRowsByProcessedRuns(rows, periodRuns);
+  // Loan lines follow the pay-class cutoff rule (Confidentials = 1st-half only,
+  // Rank And File = split evenly); other lines keep the even ½/½ split.
+  return rows.map((row) =>
+    scaleRegisterRow(deptRegisterRow(row), factor, filters.paytype, filters.payclass),
+  );
 }
 
 /** Aggregate register rows by DEPT CODE — the grouped register view. */
@@ -436,6 +724,7 @@ const round2 = (n: number) => Math.round(n * 100) / 100;
 export const PAYROLL_DEDUCTION_KEYS: RegisterNumericKey[] = [
   "sss_cont",
   "sss_loan",
+  "phic_cont",
   "hdmf_cont",
   "hdmf_loan",
   "pecewa_loan",
@@ -514,34 +803,36 @@ export function overtimeCell(row: OvertimeRow, col: OvertimeNumericColumn): numb
 }
 
 /**
- * Build the Overtime Register for the given filters. Overtime hours/pay are
- * derived deterministically per employee (mirroring the rest of the app), with
- * the filters perturbing the seed so different Year/Month/Payclass/Paytype
- * combinations return plausibly different data — standing in for the AJAX GET
- * against a real overtime table. Employees with no overtime are omitted.
+ * Build the Overtime Register for the given filters.
+ *
+ * Hours come from each payroll row's own timekeeping drivers — the same
+ * `overtimeHours` / `nightDiffHours` the data-entry grid edits — so the OT the
+ * register reports is the OT payroll actually pays. Only the distribution
+ * across the premium bands is synthesised, and it is seeded per employee so it
+ * doesn't shift when a filter reorders the list. Employees with no overtime are
+ * omitted.
  */
 export function overtimeRegister(
   employees: Employee[],
   filters: OvertimeFilters,
   overrides: PayrollOverrides = {},
+  /** Period's payroll runs — see {@link deptRegister}. */
+  periodRuns?: ProcessedRun[],
 ): OvertimeRow[] {
-  // Fold the filter selection into a stable numeric salt.
-  const salt =
-    Number(filters.year) +
-    filters.month.length * 7 +
-    filters.payclass.length * 13 +
-    filters.paytype.length * 17;
+  const inClass = filterByPayClass(employees, filters.payclass);
+  const scoped = filterRowsByAgency(buildPayrollRows(inClass, {}, overrides), filters.agency);
+  return (periodRuns ? filterRowsByProcessedRuns(scoped, periodRuns) : scoped)
+    .map((row) => {
+      const seed = employeeSeed(row.employeeId);
+      const s = (n: number, mod: number) => seeded(seed + n, mod);
+      const rate = hourlyRate(row.basic);
 
-  return filterRowsByAgency(buildPayrollRows(employees, {}, overrides), filters.agency)
-    .map((row, idx) => {
-      const i = idx + salt;
-      const s = (n: number, mod: number) => seeded(i + n, mod);
-      const rate = row.basic / 176; // hourly rate, 176 paid hrs/month
-
-      const otHrs = s(31, 24); // 0–23 OT hours this period
+      // OT hours from the row's timekeeping driver, so an edit in Data Entry
+      // (or an auto-fill) is reflected here rather than contradicted.
+      const otHrs = row.overtimeHours;
       if (otHrs === 0) return null;
 
-      const ndotHrs = s(32, 6); // night-differential OT hours
+      const ndotHrs = Math.min(row.nightDiffHours, otHrs); // ND hours worked as OT
       const ndotPay = ndotHrs * rate * 1.1 * 1.25; // ND (10%) on OT (125%)
 
       // Distribute the OT hours across the premium bands deterministically.
@@ -604,4 +895,201 @@ export function overtimeTotals(rows: OvertimeRow[]): Record<OvertimeNumericColum
     totals[col] = Math.round(sum * 100) / 100;
   }
   return totals;
+}
+
+// ---- Bank account numbers ------------------------------------------------
+
+/**
+ * Deterministic 12-digit bank account number for an employee, derived from the
+ * employee id. There is no account field on the HR record (no backend), so —
+ * like the rest of the app — we synthesise a stable value: the same employee
+ * always maps to the same account, formatted "0000-0000-0000" for display and
+ * the bank export file.
+ */
+export function accountNoFor(employeeId: string): string {
+  // Fold the id characters into a large positive integer, then take 12 digits.
+  let h = 2166136261;
+  for (let i = 0; i < employeeId.length; i++) {
+    h = (h ^ employeeId.charCodeAt(i)) >>> 0;
+    h = (h * 16777619) >>> 0;
+  }
+  const digits = String(h).padStart(12, "0").slice(-12);
+  return `${digits.slice(0, 4)}-${digits.slice(4, 8)}-${digits.slice(8, 12)}`;
+}
+
+// ---- Payslip (Tab 2) -----------------------------------------------------
+
+/**
+ * Filters that scope a Payslip query. Payroll Period maps onto the register's
+ * paytype (1st half / 2nd half / Full month); agency defaults to all staff.
+ */
+export interface PayslipFilters {
+  payclass: string;
+  month: string; // 3-letter upper e.g. "JUL"
+  year: string;
+  period: string; // "1st half" | "2nd half" | "Full month"
+  /** Staffing-agency scope; "All Agencies" / "Direct hire" or a specific name. */
+  agency?: string;
+}
+
+/** One payslip line per employee — the summary the payslip table renders. */
+export interface PayslipRow {
+  employee_id: string;
+  employee_name: string;
+  department: string;
+  account_no: string;
+  basic: number;
+  deductions: number;
+  earnings: number;
+  tax: number;
+  net_pay: number;
+}
+
+/** Turn Payslip filters into the register {@link ReportFilters} shape. */
+function payslipToReportFilters(f: PayslipFilters): ReportFilters {
+  return {
+    year: f.year,
+    month: f.month,
+    payclass: f.payclass,
+    paytype: f.period,
+    agency: f.agency ?? ALL_AGENCIES,
+  };
+}
+
+/**
+ * Build the per-employee Payslip summary for the given filters, reusing the
+ * register engine so payslip figures reconcile with the Payroll Register. Basic
+ * = BASIC RATE, Earnings = GROSS EARNINGS, Deductions = TOTAL DEDN (Tax broken
+ * out separately as BASE TAX), Net Pay = TOTAL NET.
+ */
+export function payslipRows(
+  employees: Employee[],
+  filters: PayslipFilters,
+  overrides: PayrollOverrides = {},
+  /** Period's payroll runs — see {@link deptRegister}. */
+  periodRuns?: ProcessedRun[],
+): PayslipRow[] {
+  return deptRegister(employees, payslipToReportFilters(filters), overrides, {}, periodRuns).map((r) => ({
+    employee_id: r.employee_id,
+    employee_name: r.employee_name,
+    department: r.dept_code,
+    account_no: accountNoFor(r.employee_id),
+    basic: r.basic_rate,
+    deductions: r.total_dedn,
+    earnings: r.gross_earnings,
+    tax: r.base_tax,
+    net_pay: r.total_net,
+  }));
+}
+
+/**
+ * Bank-upload rows for the Payslip "Export Bank File" action: one credit line
+ * per employee (account number, name, net pay). Ready for {@link downloadCsv}
+ * or a fixed-width text export.
+ */
+export function bankFileRows(rows: PayslipRow[]): {
+  "ACCOUNT NO": string;
+  "EMPLOYEE NAME": string;
+  AMOUNT: string;
+}[] {
+  return rows.map((r) => ({
+    "ACCOUNT NO": r.account_no.replace(/-/g, ""),
+    "EMPLOYEE NAME": r.employee_name,
+    AMOUNT: r.net_pay.toFixed(2),
+  }));
+}
+
+// ---- NET 15 (Tab 3) ------------------------------------------------------
+
+/** One NET 15 line — 1st-half net pay credited to an employee's account. */
+export interface Net15Row {
+  employee_id: string;
+  employee_name: string;
+  account_no: string;
+  net: number;
+}
+
+/**
+ * Build the NET 15 list: each employee's 1st-half net pay and destination
+ * account. Always computed for the "1st half" cutoff regardless of the caller.
+ */
+export function net15Rows(
+  employees: Employee[],
+  filters: { year: string; month: string; payclass: string; paytype: string; agency?: string },
+  overrides: PayrollOverrides = {},
+  /** Period's payroll runs — see {@link deptRegister}. */
+  periodRuns?: ProcessedRun[],
+): Net15Row[] {
+  const scoped: ReportFilters = {
+    year: filters.year,
+    month: filters.month,
+    payclass: filters.payclass,
+    paytype: "1st half",
+    agency: filters.agency ?? ALL_AGENCIES,
+  };
+  return deptRegister(employees, scoped, overrides, {}, periodRuns).map((r) => ({
+    employee_id: r.employee_id,
+    employee_name: r.employee_name,
+    account_no: accountNoFor(r.employee_id),
+    net: r.total_net,
+  }));
+}
+
+// ---- NET 15/30 (Tab 4) ---------------------------------------------------
+
+/** One NET 15/30 line — both semi-monthly nets and their total per employee. */
+export interface Net1530Row {
+  employee_id: string;
+  employee_name: string;
+  account_no: string;
+  net_15: number;
+  net_30: number;
+  total_net: number;
+}
+
+/**
+ * Build the NET 15/30 list: each employee's 1st-half (NET 15) and 2nd-half
+ * (NET 30) net pay plus their combined total. The two halves are computed
+ * independently through the register engine and joined per employee.
+ */
+export function net1530Rows(
+  employees: Employee[],
+  filters: { year: string; month: string; payclass: string; agency?: string },
+  overrides: PayrollOverrides = {},
+  /** Period's payroll runs — see {@link deptRegister}. */
+  periodRuns?: ProcessedRun[],
+): Net1530Row[] {
+  const base = {
+    year: filters.year,
+    month: filters.month,
+    payclass: filters.payclass,
+    agency: filters.agency ?? ALL_AGENCIES,
+  };
+  const first = deptRegister(employees, { ...base, paytype: "1st half" }, overrides, {}, periodRuns);
+  const second = deptRegister(employees, { ...base, paytype: "2nd half" }, overrides, {}, periodRuns);
+  const secondById = new Map(second.map((r) => [r.employee_id, r.total_net]));
+
+  return first.map((r) => {
+    const net_15 = r.total_net;
+    const net_30 = secondById.get(r.employee_id) ?? 0;
+    return {
+      employee_id: r.employee_id,
+      employee_name: r.employee_name,
+      account_no: accountNoFor(r.employee_id),
+      net_15,
+      net_30,
+      total_net: Math.round((net_15 + net_30) * 100) / 100,
+    };
+  });
+}
+
+/** Column-wise totals for the NET 15/30 footer ("TOTAL" row). */
+export function net1530Totals(rows: Net1530Row[]): { net_15: number; net_30: number; total_net: number } {
+  const sum = (pick: (r: Net1530Row) => number) =>
+    Math.round(rows.reduce((acc, r) => acc + pick(r), 0) * 100) / 100;
+  return {
+    net_15: sum((r) => r.net_15),
+    net_30: sum((r) => r.net_30),
+    total_net: sum((r) => r.total_net),
+  };
 }

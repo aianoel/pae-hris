@@ -1,7 +1,7 @@
 import * as React from "react";
 import { Activity, Database, Gauge, Wifi, WifiOff } from "lucide-react";
 
-import { Card, CardContent } from "@/components/ui/card";
+import { Card } from "@/components/ui/card";
 import { useStore } from "@/store/store-context";
 import { formatUptime, readSystemInfo, type SystemInfo } from "@/lib/monitoring";
 import { cn } from "@/lib/utils";

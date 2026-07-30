@@ -1,5 +1,5 @@
 -- Migration: add employees.pay_class
--- Adds the payroll rate class / salary band (Tier 1/Tier 2/Tier 3/Executive) to
+-- Adds the payroll rate class / salary band (Tier 1/Tier 2/Rank And File/Confidentials) to
 -- an already-provisioned database. Introduces the pay_class enum first (guarded
 -- so it is safe to run more than once), then the column defaulting to Tier 1.
 --
@@ -11,7 +11,7 @@
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'pay_class') THEN
-    CREATE TYPE public.pay_class AS ENUM ('Tier 1', 'Tier 2', 'Tier 3', 'Executive');
+    CREATE TYPE public.pay_class AS ENUM ('Tier 1', 'Tier 2', 'Rank And File', 'Confidentials');
   END IF;
 END $$;
 
@@ -26,7 +26,7 @@ BEGIN
        JOIN pg_namespace n ON n.oid = t.typnamespace
        WHERE t.typname = 'pay_class' AND n.nspname = 'aurora'
      ) THEN
-    CREATE TYPE aurora.pay_class AS ENUM ('Tier 1', 'Tier 2', 'Tier 3', 'Executive');
+    CREATE TYPE aurora.pay_class AS ENUM ('Tier 1', 'Tier 2', 'Rank And File', 'Confidentials');
   END IF;
 END $$;
 

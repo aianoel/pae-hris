@@ -47,7 +47,7 @@ export type EmployeeType = "Regular" | "Probationary" | "Contractual" | "Part-ti
 
 /** Payroll rate class / salary band. Matches the payclass scope in the payroll
  *  register reports (see RegisterReport). */
-export type PayClass = "Tier 1" | "Tier 2" | "Tier 3" | "Executive";
+export type PayClass = "Tier 1" | "Tier 2" | "Rank And File" | "Confidentials";
 
 /**
  * Human-readable tenure ("length of service") from a joined date to now, e.g.
@@ -90,6 +90,32 @@ export interface Employee {
   bioId?: string;
   /** Optional profile photo as a data URL (no backend — images are inlined). */
   avatar?: string;
+
+  // ---- Credential information (statutory PH IDs) -------------------------
+  /** Social Security System number, e.g. "07-2051835-1". */
+  sss?: string;
+  /** PhilHealth (PHIC) number, e.g. "11-050393442-6". */
+  philhealth?: string;
+  /** Pag-IBIG / HDMF number, e.g. "1210-7793-7510". */
+  pagibig?: string;
+  /** Bureau of Internal Revenue Tax Identification Number, e.g. "284-041-761". */
+  tin?: string;
+
+  // ---- Other credentials -------------------------------------------------
+  /** Passport number. */
+  passport?: string;
+  /** Driver's licence number. */
+  licence?: string;
+  /** Driver's licence expiry, ISO `YYYY-MM-DD`. */
+  licenceExpiry?: string;
+  /** Disbursement bank name, e.g. "BPI". */
+  bankName?: string;
+  /** Disbursement account number — digits only (used by the bank export file). */
+  bankAccount?: string;
+  /** Free-form label for an additional ID, e.g. "Postal ID". */
+  otherIdName?: string;
+  /** Value for the additional ID named by {@link otherIdName}. */
+  otherIdNumber?: string;
 }
 
 // Employee records live in the app store, seeded from this list. Cleared to

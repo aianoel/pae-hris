@@ -45,6 +45,7 @@ import {
   EmployeeFormDialog,
   type EmployeeFormValues,
 } from "@/components/employees/EmployeeFormDialog";
+import { EmployeeLoansDialog } from "@/components/employees/EmployeeLoansDialog";
 import { useStore } from "@/store/store-context";
 import type { Employee, EmployeeType } from "@/store/types";
 import { downloadCsv } from "@/lib/export";
@@ -79,6 +80,7 @@ export function EmployeesPage() {
   const [formOpen, setFormOpen] = React.useState(false);
   const [editing, setEditing] = React.useState<Employee | null>(null);
   const [deleting, setDeleting] = React.useState<Employee | null>(null);
+  const [loansFor, setLoansFor] = React.useState<Employee | null>(null);
 
   // Simulate initial data fetch to show the loading skeleton.
   React.useEffect(() => {
@@ -107,6 +109,7 @@ export function EmployeesPage() {
         setFormOpen(true);
       },
       onDelete: (employee) => setDeleting(employee),
+      onLoans: (employee) => setLoansFor(employee),
     },
     getRowId: (row) => row.id,
     onSortingChange: setSorting,
@@ -523,6 +526,12 @@ export function EmployeesPage() {
         }}
         employee={editing}
         onSubmit={handleFormSubmit}
+      />
+
+      <EmployeeLoansDialog
+        open={Boolean(loansFor)}
+        onOpenChange={(o) => !o && setLoansFor(null)}
+        employee={loansFor}
       />
 
       <ConfirmDialog

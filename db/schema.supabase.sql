@@ -28,6 +28,8 @@ CREATE EXTENSION IF NOT EXISTS citext WITH SCHEMA extensions;
 
 -- Drop in dependency order so re-running is clean.
 DROP VIEW  IF EXISTS public.telecom_daily CASCADE;
+DROP TABLE IF EXISTS public.employee_loan_entries CASCADE;
+DROP TABLE IF EXISTS public.loans              CASCADE;
 DROP TABLE IF EXISTS public.payroll_entries    CASCADE;
 DROP TABLE IF EXISTS public.payroll_approvals  CASCADE;
 DROP TABLE IF EXISTS public.attendance_records CASCADE;
@@ -64,7 +66,7 @@ CREATE TYPE public.employee_status    AS ENUM ('active', 'on-leave', 'inactive')
 CREATE TYPE public.attendance_state   AS ENUM ('present', 'remote', 'absent');
 CREATE TYPE public.payroll_status     AS ENUM ('draft', 'processing', 'processed', 'paid');
 CREATE TYPE public.employee_type      AS ENUM ('Regular', 'Probationary', 'Contractual', 'Part-time');
-CREATE TYPE public.pay_class           AS ENUM ('Tier 1', 'Tier 2', 'Tier 3', 'Executive');
+CREATE TYPE public.pay_class           AS ENUM ('Tier 1', 'Tier 2', 'Rank And File', 'Confidentials');
 CREATE TYPE public.contribution_type  AS ENUM ('SSS', 'PhilHealth', 'Pag-IBIG', 'Tax', 'Custom');
 CREATE TYPE public.rate_status        AS ENUM ('active', 'inactive');
 CREATE TYPE public.week_start         AS ENUM ('Monday', 'Sunday');
@@ -129,7 +131,20 @@ CREATE TABLE public.employees (
   salary        numeric(14,2)   NOT NULL DEFAULT 0 CHECK (salary >= 0),
   agency        text,
   bio_id        text            UNIQUE,
-  avatar        text
+  avatar        text,
+  -- Credential information (statutory PH identifiers) — all optional.
+  sss             text,
+  philhealth      text,
+  pagibig         text,
+  tin             text,
+  -- Other credentials. bank_account is text: leading zeros are significant.
+  passport        text,
+  licence         text,
+  licence_expiry  date,
+  bank_name       text,
+  bank_account    text,
+  other_id_name   text,
+  other_id_number text
 );
 CREATE INDEX idx_employees_department ON public.employees (department);
 CREATE INDEX idx_employees_status     ON public.employees (status);
@@ -149,15 +164,20 @@ CREATE TABLE public.attendance_records (
 CREATE INDEX idx_attendance_date     ON public.attendance_records (date);
 CREATE INDEX idx_attendance_employee ON public.attendance_records (employee_id);
 
+-- agency_scope: null = whole-company run; '' = direct hires; else agency name.
+-- Recorded so the Payroll Report can tell a processed agency from an
+-- unprocessed one instead of unlocking the whole period.
 CREATE TABLE public.payroll_runs (
   id            text           PRIMARY KEY,
   period        text           NOT NULL,
+  agency_scope  text,          -- null = all agencies; '' = direct hires; else agency name
   headcount     integer        NOT NULL DEFAULT 0 CHECK (headcount >= 0),
   gross         numeric(16,2)  NOT NULL DEFAULT 0 CHECK (gross >= 0),
   status        public.payroll_status NOT NULL DEFAULT 'draft',
   created_at    timestamptz    NOT NULL DEFAULT now()
 );
 CREATE INDEX idx_payroll_runs_status ON public.payroll_runs (status);
+CREATE INDEX idx_payroll_runs_period_scope ON public.payroll_runs (period, agency_scope);
 
 -- Payroll batches submitted from the Run-payroll review, awaiting approval on
 -- the Data-Entry screen. agency_scope: null = all, '' = direct hires, else name.
@@ -218,6 +238,64 @@ CREATE TABLE public.contribution_rates (
 );
 CREATE INDEX idx_contrib_type_effective ON public.contribution_rates (type, effective_year, effective_month);
 CREATE INDEX idx_contrib_salary_band    ON public.contribution_rates (salary_from, salary_to);
+
+CREATE TABLE public.loans (
+  id                  text        PRIMARY KEY,
+  employee_id         text        NOT NULL REFERENCES public.employees(id) ON DELETE CASCADE ON UPDATE CASCADE,
+  employee_name       text        NOT NULL DEFAULT '',  -- denormalised for display/search
+  type                text        NOT NULL,
+  reference           text        NOT NULL DEFAULT '',
+  principal           numeric(14,2) NOT NULL DEFAULT 0 CHECK (principal >= 0),
+  interest_rate       numeric(6,3)  NOT NULL DEFAULT 0 CHECK (interest_rate >= 0),  -- annual %
+  term_months         integer       NOT NULL DEFAULT 0 CHECK (term_months >= 0),
+  monthly_amortization numeric(14,2) NOT NULL DEFAULT 0 CHECK (monthly_amortization >= 0),
+  amount_paid         numeric(14,2) NOT NULL DEFAULT 0 CHECK (amount_paid >= 0),
+  start_date          date        NOT NULL,
+  status              text        NOT NULL DEFAULT 'active' CHECK (status IN ('active','paid','on-hold'))
+);
+CREATE INDEX idx_loans_employee ON public.loans (employee_id);
+CREATE INDEX idx_loans_status   ON public.loans (status);
+
+-- Per-employee, tabbed Loans ledger (distinct from `loans` above): each row is
+-- one line within a category tab, opened from the employee row action.
+CREATE TABLE public.employee_loan_entries (
+  id           text          PRIMARY KEY,
+  employee_id  text          NOT NULL REFERENCES public.employees(id) ON DELETE CASCADE ON UPDATE CASCADE,
+  tab          text          NOT NULL CHECK (tab IN ('sss','hmo','hdmf','peco','twoYears','fiveYears')),
+  amount       numeric(14,2) NOT NULL DEFAULT 0 CHECK (amount >= 0),
+  term         text          NOT NULL DEFAULT '',
+  per_month    numeric(14,2) NOT NULL DEFAULT 0 CHECK (per_month >= 0),
+  type         text          NOT NULL DEFAULT '',
+  entry_date   date          NOT NULL,
+  control      text          NOT NULL DEFAULT '',
+  paid         numeric(14,2) NOT NULL DEFAULT 0 CHECK (paid >= 0)
+);
+CREATE INDEX idx_emp_loan_entries_employee ON public.employee_loan_entries (employee_id);
+CREATE INDEX idx_emp_loan_entries_tab      ON public.employee_loan_entries (tab);
+
+-- Catalogue of leave categories, each scoped to the agencies it applies to
+-- (see src/lib/leave.ts). '*' in agencies = all agencies; '' = direct hires.
+CREATE TABLE public.leave_types (
+  id                text        PRIMARY KEY,
+  name              text        NOT NULL,
+  code              text        NOT NULL,             -- short code on payslips, e.g. 'VL'
+  description       text        NOT NULL DEFAULT '',
+  days_per_year     integer     NOT NULL DEFAULT 0 CHECK (days_per_year BETWEEN 0 AND 365),
+  pay_rule          text        NOT NULL DEFAULT 'paid' CHECK (pay_rule IN ('paid','unpaid')),
+  -- Not foreign-keyed to agencies: the direct-hire bucket isn't an agency row,
+  -- and a scope must survive an agency being renamed or de-registered.
+  agencies          text[]      NOT NULL DEFAULT ARRAY['*']::text[]
+                                CHECK (array_length(agencies, 1) >= 1),
+  carry_over        boolean     NOT NULL DEFAULT false,
+  requires_approval boolean     NOT NULL DEFAULT true,
+  status            text        NOT NULL DEFAULT 'active' CHECK (status IN ('active','inactive')),
+  created_at        timestamptz NOT NULL DEFAULT now()
+);
+-- Name/code uniqueness is case-insensitive, mirroring validateLeaveType().
+CREATE UNIQUE INDEX uq_leave_types_name ON public.leave_types (lower(btrim(name)));
+CREATE UNIQUE INDEX uq_leave_types_code ON public.leave_types (upper(btrim(code)));
+CREATE INDEX idx_leave_types_status   ON public.leave_types (status);
+CREATE INDEX idx_leave_types_agencies ON public.leave_types USING gin (agencies);
 
 CREATE TABLE public.reports (
   id            text        PRIMARY KEY,
@@ -311,6 +389,7 @@ BEGIN
   FOREACH t IN ARRAY ARRAY[
     'departments','agencies','employees','attendance_records',
     'payroll_runs','payroll_approvals','payroll_entries','contribution_rates',
+    'loans','employee_loan_entries','leave_types',
     'reports','documents','notifications','log_entries'
   ]
   LOOP

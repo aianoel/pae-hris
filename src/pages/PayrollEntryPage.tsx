@@ -1,12 +1,32 @@
 import * as React from "react";
 import { motion } from "framer-motion";
-import { Undo2, Redo2, Save, Copy, Lock, ClipboardCheck } from "lucide-react";
+import {
+  Undo2,
+  Redo2,
+  Save,
+  Copy,
+  Lock,
+  ClipboardCheck,
+  ChevronDown,
+  Check,
+  X,
+} from "lucide-react";
 
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { useToast } from "@/components/ui/toast";
 import { useStore } from "@/store/store-context";
+import type { PayrollApproval } from "@/store/types";
 import { cn, errorMessage } from "@/lib/utils";
 import { downloadCsv } from "@/lib/export";
 import { formatCurrency } from "@/lib/format";
@@ -46,11 +66,16 @@ export function PayrollEntryPage() {
     addLog,
     lwopDaysByEmployee,
     payrollOverrides,
+    contributionRates,
     payrollApprovals,
+    approvePayroll,
+    disapprovePayroll,
     savePayrollEntries,
   } = useStore();
   const { toast } = useToast();
   const [saving, setSaving] = React.useState(false);
+  // Batch pending disapproval — confirmed before it is returned to Payroll.
+  const [disapproving, setDisapproving] = React.useState<PayrollApproval | null>(null);
 
   // Once a batch is approved its amounts are frozen — the grid becomes
   // read-only until the approved batch is cleared/paid.
@@ -72,7 +97,9 @@ export function PayrollEntryPage() {
   // attendance import (keyed by employee id) override the seeded stand-in.
   const base = React.useMemo(
     () => buildPayrollRows(employees, lwopDaysByEmployee, payrollOverrides),
-    [employees, lwopDaysByEmployee, payrollOverrides],
+    // contributionRates: Government Deductions is derived from the configured
+    // SSS/PhilHealth/HDMF/Tax brackets, so a rate edit must rebuild the grid.
+    [employees, lwopDaysByEmployee, payrollOverrides, contributionRates],
   );
   const [history, setHistory] = React.useState<PayrollRow[][]>([base]);
   const [cursor, setCursor] = React.useState(0);
@@ -172,6 +199,27 @@ export function PayrollEntryPage() {
     }
   };
 
+  // ---- Approval queue actions -------------------------------------------
+  // Approving locks the batch amounts and starts the actual payroll run;
+  // disapproving drops it and returns the batch to the Payroll module.
+  const handleApprove = (a: PayrollApproval) => {
+    approvePayroll(a.id);
+    toast({
+      variant: "success",
+      title: "Payroll approved",
+      description: `${a.period} · ${a.agencyLabel} approved — amounts are locked and the run has started.`,
+    });
+  };
+
+  const handleDisapprove = (a: PayrollApproval) => {
+    disapprovePayroll(a.id);
+    toast({
+      variant: "info",
+      title: "Payroll disapproved",
+      description: `${a.period} · ${a.agencyLabel} returned to the Payroll module for editing.`,
+    });
+  };
+
   const openEmployee = (row: PayrollRow) => {
     setPanelRow(row);
     setPanelOpen(true);
@@ -202,7 +250,7 @@ export function PayrollEntryPage() {
       toast({ variant: "info", title: "Payroll generated", description: `Draft created for ${filters.period}.` });
     },
     autofill: () => {
-      commitRows(rows.map((r, i) => autoFillRow(r, i)));
+      commitRows(rows.map((r) => autoFillRow(r)));
       if (status === "Draft") setStatus("Processing");
       addLog("payroll", `auto-filled payroll for ${filters.period}`, `${rows.length} employees`);
       toast({ variant: "success", title: "Payroll auto-filled", description: "Earnings and deductions recomputed from HR data. All cells remain editable." });
@@ -300,15 +348,11 @@ export function PayrollEntryPage() {
                       {formatCurrency(a.gross)} · Net {formatCurrency(a.net)}
                     </p>
                   </div>
-                  {a.status === "approved" ? (
-                    <span className="inline-flex items-center gap-1.5 rounded-full bg-success/10 px-3 py-1 text-sm font-medium text-success">
-                      <Lock className="h-3.5 w-3.5" /> Approved · locked
-                    </span>
-                  ) : (
-                    <span className="inline-flex items-center gap-1.5 rounded-full bg-muted px-3 py-1 text-sm font-medium text-muted-foreground">
-                      <ClipboardCheck className="h-3.5 w-3.5" /> Pending approval
-                    </span>
-                  )}
+                  <ApprovalStatusMenu
+                    approval={a}
+                    onApprove={() => handleApprove(a)}
+                    onDisapprove={() => setDisapproving(a)}
+                  />
                 </div>
               ))}
             </div>
@@ -339,6 +383,87 @@ export function PayrollEntryPage() {
         count={selectedIds.length}
         onApply={applyBulk}
       />
+
+      {/* Disapproving discards the submitted batch, so confirm it first.
+          Approving is not confirmed here — it is reversible from the Payroll
+          Report (Disapprove reverts a paid run). */}
+      <ConfirmDialog
+        open={Boolean(disapproving)}
+        onOpenChange={(o) => !o && setDisapproving(null)}
+        title="Disapprove payroll?"
+        description={
+          disapproving
+            ? `${disapproving.period} · ${disapproving.agencyLabel} will be removed from the approval queue and returned to the Payroll module for editing.`
+            : undefined
+        }
+        confirmLabel="Disapprove"
+        destructive
+        onConfirm={() => {
+          if (disapproving) handleDisapprove(disapproving);
+        }}
+      />
     </>
+  );
+}
+
+/**
+ * Status control for a queued batch: the current approval state doubles as the
+ * dropdown trigger, so the approver changes it in place rather than hunting for
+ * a separate action. Approved batches keep the menu (with Approve marked and
+ * disabled) so the state stays legible and Disapprove remains reachable.
+ */
+function ApprovalStatusMenu({
+  approval,
+  onApprove,
+  onDisapprove,
+}: {
+  approval: PayrollApproval;
+  onApprove: () => void;
+  onDisapprove: () => void;
+}) {
+  const approved = approval.status === "approved";
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          aria-label={`Approval status for ${approval.period} — ${approval.agencyLabel}`}
+          className={cn(
+            "inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-sm font-medium transition-colors",
+            "outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
+            approved
+              ? "bg-success/10 text-success hover:bg-success/20"
+              : "bg-muted text-muted-foreground hover:bg-secondary hover:text-foreground",
+          )}
+        >
+          {approved ? (
+            <>
+              <Lock className="h-3.5 w-3.5" /> Approved · locked
+            </>
+          ) : (
+            <>
+              <ClipboardCheck className="h-3.5 w-3.5" /> Pending approval
+            </>
+          )}
+          <ChevronDown className="h-3.5 w-3.5 opacity-60" />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-56">
+        <DropdownMenuLabel>Set approval status</DropdownMenuLabel>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem
+          disabled={approved}
+          onSelect={() => onApprove()}
+          className="[&_svg]:text-success"
+        >
+          <Check /> Approve
+          {approved && <span className="ml-auto text-xs text-muted-foreground">Current</span>}
+        </DropdownMenuItem>
+        <DropdownMenuItem destructive onSelect={() => onDisapprove()}>
+          <X /> Disapprove
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }

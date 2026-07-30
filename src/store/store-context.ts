@@ -20,6 +20,9 @@ import type {
   LogType,
 } from "./types";
 import type { ContributionRate, ContributionType } from "@/lib/contributions";
+import type { Loan } from "@/lib/loans";
+import type { LeaveType, LeaveTypeDraft } from "@/lib/leave";
+import type { LoanEntry, EmployeeLoans, NewLoanEntry } from "@/lib/employeeLoans";
 import type { PayrollRow, PayrollOverrides } from "@/lib/payroll";
 
 /**
@@ -48,6 +51,8 @@ export interface StoreValue {
   notifications: Notification[];
   logs: LogEntry[];
   contributionRates: ContributionRate[];
+  /** Employee loans repaid through payroll amortisations. */
+  loans: Loan[];
   /** Registered manpower/staffing agencies, managed under Settings. */
   agencies: Agency[];
 
@@ -104,13 +109,19 @@ export interface StoreValue {
   disapprovePayrollRun: (id: string) => void;
   /** Permanently remove a single payroll run. */
   removePayrollRun: (id: string) => void;
-  /** Approve every payroll run for `period`: mark them paid (final). */
-  approvePayrollPeriod: (period: string) => void;
+  /**
+   * Approve the payroll runs for `period`: mark them paid (final). Pass the
+   * report's `agency` selection to approve only that agency's run; omit it (or
+   * pass "All Agencies") to approve every run in the period. Returns how many
+   * runs were approved.
+   */
+  approvePayrollPeriod: (period: string, agency?: string) => number;
   /**
    * Disapprove `period`: remove its payroll run(s) so the report locks again
-   * and the period returns for re-running. Returns how many runs were removed.
+   * and the period returns for re-running. Scoped by `agency` the same way as
+   * {@link approvePayrollPeriod}. Returns how many runs were removed.
    */
-  disapprovePayrollPeriod: (period: string) => number;
+  disapprovePayrollPeriod: (period: string, agency?: string) => number;
   /**
    * Submit a reviewed batch for approval (from the Run-payroll review modal).
    * It appears on the Data-Entry screen as a pending approval.
@@ -168,6 +179,46 @@ export interface StoreValue {
     month?: number;
     year?: number;
   }) => number;
+
+  // Loans
+  /**
+   * Register a loan. `id` and `monthlyAmortization` are assigned here — the
+   * amortisation is always derived from principal/rate/term, never passed in.
+   */
+  addLoan: (draft: Omit<Loan, "id" | "monthlyAmortization">) => Loan;
+  /** Patch a loan; the amortisation is recomputed whenever a driver changes. */
+  updateLoan: (id: string, patch: Partial<Omit<Loan, "id">>) => void;
+  /** Permanently remove a loan. */
+  removeLoan: (id: string) => void;
+  /** Create several loans at once (spreadsheet import). Returns the count added. */
+  importLoans: (rows: Omit<Loan, "id" | "monthlyAmortization">[]) => number;
+  /**
+   * Record a repayment against a loan. The balance advances and the loan
+   * auto-closes to "paid" once fully settled.
+   */
+  recordLoanPayment: (id: string, amount: number) => void;
+
+  // Leave types (catalogue of leave categories, scoped per agency)
+  /** Every leave type in the workspace, newest first. */
+  leaveTypes: LeaveType[];
+  /** Create a leave type. `id`/`createdAt` are assigned here. */
+  addLeaveType: (draft: LeaveTypeDraft) => LeaveType;
+  /** Patch a leave type in place. */
+  updateLeaveType: (id: string, patch: Partial<Omit<LeaveType, "id" | "createdAt">>) => void;
+  /** Permanently remove a leave type. */
+  removeLeaveType: (id: string) => void;
+  /** Create several leave types at once (the statutory presets). Returns the count added. */
+  addLeaveTypes: (drafts: LeaveTypeDraft[]) => number;
+
+  // Employee loan entries (per-employee, tabbed Loans ledger)
+  /** Every employee's loan-ledger lines (flat; group per employee with groupByTab). */
+  employeeLoanEntries: LoanEntry[];
+  /** One employee's ledger, grouped into the per-tab shape the dialog renders. */
+  loansForEmployee: (employeeId: string) => EmployeeLoans;
+  /** Append a ledger line (id/control/perMonth are assigned here). */
+  addEmployeeLoanEntry: (entry: NewLoanEntry) => LoanEntry;
+  /** Remove a ledger line by id. */
+  removeEmployeeLoanEntry: (id: string) => void;
 }
 
 export const StoreContext = React.createContext<StoreValue | null>(null);

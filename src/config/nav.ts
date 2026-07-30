@@ -5,6 +5,7 @@ import {
   IdCard,
   Building2,
   CalendarCheck,
+  CalendarDays,
   Wallet,
   PenLine,
   Receipt,
@@ -34,6 +35,7 @@ export const navItems: NavItem[] = [
   { label: "Departments", to: "/departments", icon: Building2, group: "People" },
 
   { label: "Attendance", to: "/attendance", icon: CalendarCheck, group: "Operations" },
+  { label: "Leave", to: "/leave", icon: CalendarDays, group: "Operations" },
   { label: "Payroll", to: "/payroll", icon: Wallet, group: "Operations" },
   { label: "Payroll Data Entry", to: "/payroll/data-entry", icon: PenLine, group: "Operations" },
   { label: "Payroll Report", to: "/payroll/report", icon: Receipt, group: "Operations" },

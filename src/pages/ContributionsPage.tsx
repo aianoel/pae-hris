@@ -12,13 +12,18 @@ import { formatCurrency } from "@/lib/format";
 import {
   CONTRIBUTION_TYPES,
   validateRate,
+  defaultEarningsMatrix,
+  toggleEarning,
   type ContributionRate,
   type ContributionType,
   type RateStatus,
   type RateDraft,
+  type EarningCode,
+  type EarningsMatrix,
 } from "@/lib/contributions";
 import { matrixReport } from "@/lib/contributionReports";
 import { ContributionMatrix } from "@/components/contributions/ContributionMatrix";
+import { RateTable } from "@/components/contributions/RateTable";
 import { ScheduleMatrix } from "@/components/contributions/ScheduleMatrix";
 import { RateFormDialog } from "@/components/contributions/RateFormDialog";
 import { SalaryCalculator } from "@/components/contributions/SalaryCalculator";
@@ -67,6 +72,14 @@ export function ContributionsPage() {
   const [editing, setEditing] = React.useState<ContributionRate | null>(null);
   const [deleting, setDeleting] = React.useState<ContributionRate | null>(null);
   const [groupDeleteOpen, setGroupDeleteOpen] = React.useState(false);
+
+  // Contribution Matrix: which earning types count toward each contribution's
+  // base. Local UI config (no backend), seeded with sensible statutory defaults.
+  const [earningsMatrix, setEarningsMatrix] = React.useState<EarningsMatrix>(defaultEarningsMatrix);
+  const toggleMatrixEarning = (type: ContributionType, code: EarningCode) =>
+    setEarningsMatrix((m) => toggleEarning(m, type, code));
+  const setMatrixEarnings = (type: ContributionType, codes: EarningCode[]) =>
+    setEarningsMatrix((m) => ({ ...m, [type]: codes }));
 
   // ---- CRUD --------------------------------------------------------------
   const openCreate = () => {
@@ -151,6 +164,7 @@ export function ContributionsPage() {
       <Tabs defaultValue="matrix" className="space-y-4">
         <TabsList>
           <TabsTrigger value="matrix">Contribution Matrix</TabsTrigger>
+          <TabsTrigger value="schedule">Schedule</TabsTrigger>
           <TabsTrigger value="rates">Rate Table</TabsTrigger>
           <TabsTrigger value="calculator">Calculator</TabsTrigger>
           <TabsTrigger value="employee">Employee</TabsTrigger>
@@ -158,11 +172,19 @@ export function ContributionsPage() {
         </TabsList>
 
         <TabsContent value="matrix">
+          <ContributionMatrix
+            matrix={earningsMatrix}
+            onToggle={toggleMatrixEarning}
+            onSetAll={setMatrixEarnings}
+          />
+        </TabsContent>
+
+        <TabsContent value="schedule">
           <ScheduleMatrix rates={contributionRates} />
         </TabsContent>
 
         <TabsContent value="rates">
-          <ContributionMatrix
+          <RateTable
             rates={contributionRates}
             onEdit={openEdit}
             onDelete={setDeleting}

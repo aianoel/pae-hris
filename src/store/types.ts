@@ -60,6 +60,16 @@ export type PayrollStatus = "draft" | "processing" | "processed" | "paid";
 export interface PayrollRun {
   id: string;
   period: string; // e.g. "December 2026"
+  /**
+   * Agency scope this run actually paid: `null`/absent = every employee,
+   * `""` = direct hires only, otherwise the agency name. Mirrors
+   * `PayrollApproval.agencyScope`, and is what lets the Payroll Report tell an
+   * agency that has been processed from one that has not.
+   *
+   * Absent on runs created before the scope was recorded; those are treated as
+   * whole-company runs, which is what they were.
+   */
+  agencyScope?: string | null;
   headcount: number;
   gross: number;
   status: PayrollStatus;

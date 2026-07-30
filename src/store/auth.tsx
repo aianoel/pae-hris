@@ -40,6 +40,9 @@ function initialsOf(name: string) {
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const { users, addLog } = useStore();
   const [user, setUser] = React.useState<AuthUser | null>(null);
+  // Set when Supabase reports a PASSWORD_RECOVERY event (the user arrived from
+  // a reset link). The app then forces the "set a new password" screen.
+  const [recovery, setRecovery] = React.useState(false);
 
   // Keep the module-level audit actor in sync with the signed-in user, so
   // addLog() (which lives above this provider) attributes events correctly.
@@ -88,8 +91,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
     });
 
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
+    const { data: sub } = supabase.auth.onAuthStateChange((event, session) => {
       if (!active) return;
+      // Arriving from a reset link signs the user in with a recovery session.
+      // Flag it so the app routes to the "set a new password" screen; the flag
+      // is cleared once the new password is committed (or on sign-out).
+      if (event === "PASSWORD_RECOVERY") setRecovery(true);
+      if (event === "SIGNED_OUT") setRecovery(false);
       const email = session?.user?.email;
       setUser(email ? resolveAppUser(email) : null);
     });
@@ -99,6 +107,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       sub.subscription.unsubscribe();
     };
   }, [resolveAppUser]);
+
+  // Re-resolve the signed-in user whenever the app `users` list changes, so an
+  // edit to the current user's profile (e.g. Settings → Profile) reflects live
+  // — name and initials update without a reload. Keyed on the email so this only
+  // re-runs when the roster changes, not on every re-render.
+  const currentEmail = user?.email ?? null;
+  React.useEffect(() => {
+    if (!currentEmail) return;
+    setUser(resolveAppUser(currentEmail));
+    // resolveAppUser is recreated when `users` changes, which is the trigger.
+  }, [currentEmail, resolveAppUser]);
 
   const login = React.useCallback(
     async (email: string, password: string): Promise<boolean> => {
@@ -191,17 +210,67 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     [user, addLog],
   );
 
+  // Email a password-recovery link. Unlike signUpUser this never mints or
+  // swaps a session, so the admin's session is untouched — Supabase just sends
+  // the mail and the recipient sets their own password via the link.
+  const sendPasswordReset = React.useCallback<AuthContextValue["sendPasswordReset"]>(
+    async (email) => {
+      const normalized = email.trim().toLowerCase();
+      if (!normalized) return { ok: false, error: "An email address is required." };
+      if (!isSupabaseConfigured || !supabase) {
+        return { ok: false, error: "A Supabase backend is required to send password resets." };
+      }
+
+      const { error } = await supabase.auth.resetPasswordForEmail(normalized, {
+        // Land the recovery link back on the running app rather than Supabase's
+        // configured Site URL default.
+        redirectTo: window.location.origin,
+      });
+      if (error) return { ok: false, error: error.message };
+
+      addLog("auth", `sent password reset link to ${normalized}`, "password-reset");
+      return { ok: true };
+    },
+    [addLog],
+  );
+
+  // Commit the new password for the recovery session opened by the reset link.
+  const completePasswordReset = React.useCallback<AuthContextValue["completePasswordReset"]>(
+    async (password) => {
+      if (!isSupabaseConfigured || !supabase) {
+        return { ok: false, error: "A Supabase backend is required to reset passwords." };
+      }
+      const { data, error } = await supabase.auth.updateUser({ password });
+      if (error) return { ok: false, error: error.message };
+
+      setRecovery(false);
+      addLog("auth", `password reset completed (${data.user?.email ?? "unknown"})`, "password-reset");
+      return { ok: true };
+    },
+    [addLog],
+  );
+
   const logout = React.useCallback(() => {
     if (user) addLog("auth", `signed out (${user.email})`, "logout");
     setUser(null);
+    setRecovery(false);
     if (isSupabaseConfigured && supabase) {
       void supabase.auth.signOut();
     }
   }, [user, addLog]);
 
   const value = React.useMemo<AuthContextValue>(
-    () => ({ user, login, logout, isAdmin: hasFullAccess(user?.access), signUpUser }),
-    [user, login, logout, signUpUser],
+    () => ({
+      user,
+      login,
+      logout,
+      isAdmin: hasFullAccess(user?.access),
+      signUpUser,
+      sendPasswordReset,
+      recovery,
+      completePasswordReset,
+    }),
+    [user, login, logout, signUpUser, sendPasswordReset, recovery, completePasswordReset],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

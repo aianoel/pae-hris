@@ -1,6 +1,5 @@
 import * as React from "react";
-import { Printer, AlertTriangle, ArrowUpDown, Search } from "lucide-react";
-import Swal from "sweetalert2";
+import { Printer, ArrowUpDown } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -16,7 +15,8 @@ import {
   overtimeTotals,
   overtimeCell,
   agencyFilterOptions,
-  isPayrollProcessed,
+  reportBrandFor,
+  runsForPeriod,
   ALL_AGENCIES,
   OT_RATE_BANDS,
   OVERTIME_NUMERIC_COLUMNS,
@@ -24,6 +24,10 @@ import {
   type OvertimeFilters,
   type OvertimeNumericColumn,
 } from "@/lib/payrollReports";
+import { fmt } from "./reportFilters";
+import { useReportFilters } from "./reportFilterContext";
+import { useSettledFilters } from "./useAutoReport";
+import { ReportNotice } from "./ReportNotice";
 
 /** Column definitions in display order — dept code first, then the numerics. */
 const COLUMNS: { key: "dept_code" | OvertimeNumericColumn; label: string; numeric: boolean }[] = [
@@ -34,48 +38,53 @@ const COLUMNS: { key: "dept_code" | OvertimeNumericColumn; label: string; numeri
   ...OT_RATE_BANDS.map((b) => ({ key: `rate_${b}` as OvertimeNumericColumn, label: `${b}%`, numeric: true })),
 ];
 
-const YEARS = ["2024", "2025", "2026", "2027"];
-const MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
-const PAYCLASSES = ["Tier 1", "Tier 2", "Tier 3", "Executive"];
-const PAYTYPES = ["1st half", "2nd half", "Full month"];
-
-const DEFAULT_FILTERS: OvertimeFilters = {
-  year: "2026",
-  month: "JUL",
-  payclass: "Tier 1",
-  paytype: "1st half",
-  agency: ALL_AGENCIES,
-};
-
-/** Format a number to a fixed 2 decimals with thousands separators. */
-const fmt = (n: number) =>
-  n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-
 type SortKey = "dept_code" | OvertimeNumericColumn;
 
 /**
- * Overtime Register — filter by Year/Month/Payclass/Paytype, hit GET to load the
- * (in-memory, deterministically derived) data grouped by department, sort any
- * column, and print the full register or an employee-level breakdown.
+ * Overtime Register — dept-grouped overtime for the shared Year/Month/Payclass/
+ * Paytype period, reloading automatically as those filters change (no GET
+ * button). Sort any column, and print the full register or an employee-level
+ * breakdown. Agency is the one filter that stays local to this tab.
  */
 export function OvertimeRegister() {
-  const { employees, payrollRuns, payrollOverrides } = useStore();
+  const { employees, agencies, payrollRuns, payrollOverrides } = useStore();
   const { toast } = useToast();
+  const shared = useReportFilters();
 
   const agencyOptions = React.useMemo(() => agencyFilterOptions(employees), [employees]);
 
-  const [filters, setFilters] = React.useState<OvertimeFilters>(DEFAULT_FILTERS);
-  // `loaded` gates the empty state — nothing shows until GET is pressed.
-  const [applied, setApplied] = React.useState<OvertimeFilters | null>(null);
+  const [agency, setAgency] = React.useState(ALL_AGENCIES);
   const [sortKey, setSortKey] = React.useState<SortKey>("dept_code");
   const [sortDir, setSortDir] = React.useState<"asc" | "desc">("asc");
 
-  const patch = (p: Partial<OvertimeFilters>) => setFilters((f) => ({ ...f, ...p }));
+  const filters: OvertimeFilters = React.useMemo(
+    () => ({
+      year: shared.year,
+      month: shared.month,
+      payclass: shared.payclass,
+      paytype: shared.paytype,
+      agency,
+    }),
+    [shared.year, shared.month, shared.payclass, shared.paytype, agency],
+  );
+  const { settled, settling } = useSettledFilters(filters);
 
-  // Raw per-employee rows (only recomputed when a query is applied via GET).
+  // Raw per-employee rows, recomputed automatically as the filters settle.
+  // Processed-ness is per agency: an agency that was never run must stay empty
+  // even when another agency has been processed for the same period.
+  const agencyProcessed = shared.processedFor(agency);
+
+  // The period's runs, so "All Agencies" reports only the agencies actually
+  // processed rather than every employee on file.
+  const periodRuns = React.useMemo(
+    () => runsForPeriod(payrollRuns, shared.month, shared.year),
+    [payrollRuns, shared.month, shared.year],
+  );
+
   const employeeRows = React.useMemo(
-    () => (applied ? overtimeRegister(employees, applied, payrollOverrides) : []),
-    [employees, applied, payrollOverrides],
+    () =>
+      agencyProcessed ? overtimeRegister(employees, settled, payrollOverrides, periodRuns) : [],
+    [employees, settled, payrollOverrides, agencyProcessed, periodRuns],
   );
   const deptRows = React.useMemo(() => overtimeByDept(employeeRows), [employeeRows]);
 
@@ -97,30 +106,11 @@ export function OvertimeRegister() {
     }
   };
 
-  const onGet = () => {
-    // Guard: refuse to load overtime for a month/year that hasn't had payroll
-    // processed yet — surface a SweetAlert instead of showing empty/derived data.
-    if (!isPayrollProcessed(payrollRuns, filters.month, filters.year)) {
-      void Swal.fire({
-        icon: "warning",
-        title: "Payroll not yet processed",
-        text: `No payroll has been processed for ${filters.month} ${filters.year}. Process payroll for this period before viewing the Overtime Register.`,
-        confirmButtonText: "OK",
-      });
-      return;
-    }
-    setApplied(filters);
-    const n = overtimeRegister(employees, filters, payrollOverrides).length;
-    toast({
-      variant: n ? "success" : "info",
-      title: "Overtime loaded",
-      description: `${filters.month} ${filters.year} · ${filters.payclass} · ${filters.paytype} · ${filters.agency} — ${n} employees with OT.`,
-    });
-  };
+  const scope = `${shared.month} ${shared.year} · ${shared.payclass} · ${shared.paytype} · ${agency}`;
 
-  const scope = applied
-    ? `${applied.month} ${applied.year} · ${applied.payclass} · ${applied.paytype} · ${applied.agency}`
-    : undefined;
+  // Letterhead for the printout — set only when a specific agency is selected,
+  // so "All Agencies" and "Direct hire" print unbranded.
+  const brand = React.useMemo(() => reportBrandFor(agency, agencies), [agency, agencies]);
 
   // Build a print payload from the given rows (2-decimal formatted strings).
   const toPrintable = (source: OvertimeRow[], withEmployee: boolean) =>
@@ -136,75 +126,53 @@ export function OvertimeRegister() {
 
   const printRegister = () => {
     if (!rows.length) {
-      toast({ variant: "info", title: "Nothing to print", description: "Click GET to load data first." });
+      toast({ variant: "info", title: "Nothing to print", description: "No overtime data for this period." });
       return;
     }
-    const ok = printReport("Overtime Register", toPrintable(rows, false), { subtitle: scope });
+    const ok = printReport("Overtime Register", toPrintable(rows, false), { subtitle: scope, brand });
     if (!ok) toast({ variant: "error", title: "Popup blocked", description: "Allow popups to print or save as PDF." });
   };
 
   const printByEmployee = () => {
     if (!employeeRows.length) {
-      toast({ variant: "info", title: "Nothing to print", description: "Click GET to load data first." });
+      toast({ variant: "info", title: "Nothing to print", description: "No overtime data for this period." });
       return;
     }
     const sorted = [...employeeRows].sort(
       (a, b) => a.dept_code.localeCompare(b.dept_code) || a.employee_name.localeCompare(b.employee_name),
     );
-    const ok = printReport("Overtime Register by Employee", toPrintable(sorted, true), { subtitle: scope });
+    const ok = printReport("Overtime Register by Employee", toPrintable(sorted, true), { subtitle: scope, brand });
     if (!ok) toast({ variant: "error", title: "Popup blocked", description: "Allow popups to print or save as PDF." });
   };
 
   return (
     <div className="space-y-4">
-      {/* Filter row: Year · Month · Payclass · Paytype · GET */}
+      {/* Only Agency is tab-local — the period filters are shared and set once
+          in the page header. The register reloads automatically. */}
       <Card className="flex flex-wrap items-end gap-4 p-4">
-        <ChipSelect label="Year" value={filters.year} options={YEARS} onChange={(v) => patch({ year: v })} />
-        <ChipSelect label="Month" value={filters.month} options={MONTHS} onChange={(v) => patch({ month: v })} />
-        <div className="space-y-1.5">
-          <Label htmlFor="ot-payclass">Payclass</Label>
-          <Select id="ot-payclass" className="h-11 w-40" value={filters.payclass} onChange={(e) => patch({ payclass: e.target.value })}>
-            {PAYCLASSES.map((p) => (
-              <option key={p} value={p}>{p}</option>
-            ))}
-          </Select>
-        </div>
-        <div className="space-y-1.5">
-          <Label htmlFor="ot-paytype">Paytype</Label>
-          <Select id="ot-paytype" className="h-11 w-40" value={filters.paytype} onChange={(e) => patch({ paytype: e.target.value })}>
-            {PAYTYPES.map((p) => (
-              <option key={p} value={p}>{p}</option>
-            ))}
-          </Select>
-        </div>
         <div className="space-y-1.5">
           <Label htmlFor="ot-agency">Agency</Label>
-          <Select id="ot-agency" className="h-11 w-44" value={filters.agency} onChange={(e) => patch({ agency: e.target.value })}>
+          <Select id="ot-agency" className="h-11 w-44" value={agency} onChange={(e) => setAgency(e.target.value)}>
             {agencyOptions.map((a) => (
               <option key={a} value={a}>{a}</option>
             ))}
           </Select>
         </div>
-        <Button className="h-11" onClick={onGet}>
-          <Search className="h-4 w-4" /> GET
-        </Button>
+        <div className="ml-auto flex flex-wrap items-center gap-2">
+          <Button variant="outline" className="h-11" onClick={printRegister}>
+            <Printer className="h-4 w-4" /> PRINT OVERTIME REGISTER
+          </Button>
+          <Button variant="outline" className="h-11" onClick={printByEmployee}>
+            <Printer className="h-4 w-4" /> PRINT OVERTIME REGISTER BY EMPLOYEE
+          </Button>
+        </div>
       </Card>
-
-      {/* Print actions */}
-      <div className="flex flex-wrap gap-2">
-        <Button variant="outline" onClick={printRegister}>
-          <Printer className="h-4 w-4" /> PRINT OVERTIME REGISTER
-        </Button>
-        <Button variant="outline" onClick={printByEmployee}>
-          <Printer className="h-4 w-4" /> PRINT OVERTIME REGISTER BY EMPLOYEE
-        </Button>
-      </div>
 
       {/* Overtime Register table */}
       <Card className="overflow-hidden">
         <div className="border-b border-border px-5 py-3">
           <h3 className="text-sm font-semibold text-foreground">Overtime Register</h3>
-          {scope && <p className="text-xs text-muted-foreground">{scope}</p>}
+          <p className="text-xs text-muted-foreground">{scope}</p>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full border-collapse">
@@ -234,10 +202,15 @@ export function OvertimeRegister() {
               {rows.length === 0 ? (
                 <tr>
                   <td colSpan={COLUMNS.length} className="px-5 py-16 text-center">
-                    <div className="flex flex-col items-center gap-2 text-muted-foreground">
-                      <AlertTriangle className="h-6 w-6 text-amber-500" />
-                      <span className="text-sm">Click Get to load data.</span>
-                    </div>
+                    <ReportNotice
+                      blocked={!agencyProcessed}
+                      settling={settling}
+                      month={shared.month}
+                      year={shared.year}
+                      payclass={shared.payclass}
+                      agency={agency}
+                      noun="overtime"
+                    />
                   </td>
                 </tr>
               ) : (
@@ -271,38 +244,6 @@ export function OvertimeRegister() {
           </table>
         </div>
       </Card>
-    </div>
-  );
-}
-
-/** A labelled select styled as a "chip" showing the selected value + checkmark. */
-function ChipSelect({
-  label,
-  value,
-  options,
-  onChange,
-}: {
-  label: string;
-  value: string;
-  options: string[];
-  onChange: (v: string) => void;
-}) {
-  return (
-    <div className="space-y-1.5">
-      <Label htmlFor={`ot-${label}`}>{label}</Label>
-      <div className="relative inline-flex items-center">
-        <span className="pointer-events-none absolute left-3 text-primary">✓</span>
-        <Select
-          id={`ot-${label}`}
-          className="h-11 w-28 pl-8 font-medium text-primary"
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-        >
-          {options.map((o) => (
-            <option key={o} value={o} className="text-foreground">{o}</option>
-          ))}
-        </Select>
-      </div>
     </div>
   );
 }

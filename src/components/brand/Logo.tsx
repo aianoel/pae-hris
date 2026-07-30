@@ -36,7 +36,7 @@ export function Logo({ className, withWordmark = true, inverted = false }: LogoP
             inverted ? "text-white" : "text-foreground",
           )}
         >
-          Aurora
+          PAE HRIS
         </span>
       )}
     </div>

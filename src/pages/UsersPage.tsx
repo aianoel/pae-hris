@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Plus, MoreHorizontal, Pencil, Trash2, Power, Search, ShieldCheck, Check } from "lucide-react";
+import { Plus, MoreHorizontal, Pencil, Trash2, Power, Search, ShieldCheck, Check, KeyRound } from "lucide-react";
 
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Button } from "@/components/ui/button";
@@ -56,12 +56,14 @@ const MODULE_GROUPS = CONTROLLABLE_MODULES.reduce<Record<string, typeof CONTROLL
 
 export function UsersPage() {
   const { users, roles, addUser, updateUser, removeUser, toggleUserActive } = useStore();
-  const { signUpUser } = useAuth();
+  const { signUpUser, sendPasswordReset } = useAuth();
   const { toast } = useToast();
   const [query, setQuery] = React.useState("");
   const [formOpen, setFormOpen] = React.useState(false);
   const [editing, setEditing] = React.useState<User | null>(null);
   const [deleting, setDeleting] = React.useState<User | null>(null);
+  const [resetting, setResetting] = React.useState<User | null>(null);
+  const [sendingReset, setSendingReset] = React.useState(false);
 
   const roleNames = roles.map((r) => r.name);
   const [name, setName] = React.useState("");
@@ -165,6 +167,32 @@ export function UsersPage() {
     }
   };
 
+  // Email a Supabase recovery link to the selected user. The password itself is
+  // never set (or seen) here — the recipient chooses it from the emailed link.
+  const confirmReset = async () => {
+    if (!resetting) return;
+    setSendingReset(true);
+    try {
+      const res = await sendPasswordReset(resetting.email);
+      if (res.ok) {
+        toast({
+          variant: "success",
+          title: "Reset link sent",
+          description: `${resetting.email} can now set a new password from the emailed link.`,
+        });
+        setResetting(null);
+      } else {
+        toast({
+          variant: "error",
+          title: "Couldn't send reset link",
+          description: res.error ?? "The password reset email could not be sent.",
+        });
+      }
+    } finally {
+      setSendingReset(false);
+    }
+  };
+
   const filtered = users.filter(
     (u) =>
       u.name.toLowerCase().includes(query.toLowerCase()) ||
@@ -249,6 +277,9 @@ export function UsersPage() {
                         <DropdownMenuItem onSelect={() => openEdit(u)}>
                           <Pencil /> Edit &amp; access
                         </DropdownMenuItem>
+                        <DropdownMenuItem onSelect={() => setResetting(u)}>
+                          <KeyRound /> Reset password
+                        </DropdownMenuItem>
                         <DropdownMenuItem onSelect={() => toggleUserActive(u.id)}>
                           <Power /> {u.status === "active" ? "Deactivate" : "Activate"}
                         </DropdownMenuItem>
@@ -307,7 +338,8 @@ export function UsersPage() {
                 />
                 {editing && (
                   <p className="text-xs text-muted-foreground">
-                    Passwords are managed by Supabase Auth. Use a password reset to change it.
+                    Passwords are managed by Supabase Auth. Use the row's “Reset password” action
+                    to email this user a reset link.
                   </p>
                 )}
               </div>
@@ -407,6 +439,29 @@ export function UsersPage() {
               </Button>
             </DialogFooter>
           </form>
+        </DialogContent>
+      </Dialog>
+
+      {/* Password reset — its own dialog (not ConfirmDialog) so the send can
+          show a pending state and stay open if the email fails. */}
+      <Dialog open={Boolean(resetting)} onOpenChange={(o) => !o && !sendingReset && setResetting(null)}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Reset password?</DialogTitle>
+            <DialogDescription>
+              {resetting
+                ? `A password reset link will be emailed to ${resetting.email}. ${resetting.name} keeps their current password until they set a new one from that link.`
+                : undefined}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="mt-2">
+            <Button variant="outline" onClick={() => setResetting(null)} disabled={sendingReset}>
+              Cancel
+            </Button>
+            <Button onClick={confirmReset} disabled={sendingReset}>
+              {sendingReset ? "Sending…" : "Send reset link"}
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
 

@@ -60,10 +60,30 @@ function Toggle({ checked, onChange, label, desc }: { checked: boolean; onChange
 }
 
 export function SettingsPage() {
-  const { settings, updateSettings, agencies, addAgency, updateAgencyLogo, removeAgency } = useStore();
+  const { settings, updateSettings, agencies, addAgency, updateAgencyLogo, removeAgency, users, updateUser } = useStore();
   const { user } = useAuth();
   const { theme, setTheme } = useTheme();
   const { toast } = useToast();
+
+  // Profile tab: the display name is editable and saved to the user's record.
+  // Email (Supabase Auth identity) and Role (governed by Roles/access) stay
+  // read-only. Whether the signed-in session maps to a managed users row decides
+  // if the edit can be persisted at all.
+  const profileRow = React.useMemo(
+    () => (user ? users.find((u) => u.id === user.id) : undefined),
+    [users, user],
+  );
+  const [profileName, setProfileName] = React.useState(user?.name ?? "");
+  React.useEffect(() => setProfileName(user?.name ?? ""), [user?.name]);
+
+  const nameTrimmed = profileName.trim();
+  const nameDirty = Boolean(profileRow) && nameTrimmed !== "" && nameTrimmed !== profileRow!.name;
+
+  const saveProfile = () => {
+    if (!profileRow || !nameDirty) return;
+    updateUser(profileRow.id, { name: nameTrimmed });
+    toast({ variant: "success", title: "Profile updated", description: "Your display name was saved." });
+  };
 
   // Local draft so edits are staged until "Save".
   const [draft, setDraft] = React.useState<Settings>(settings);
@@ -138,17 +158,40 @@ export function SettingsPage() {
             <CardContent className="space-y-4 p-6">
               <div className="space-y-1.5">
                 <Label htmlFor="prof-name">Name</Label>
-                <input id="prof-name" defaultValue={user?.name ?? ""} className={fieldClass} disabled />
+                <input
+                  id="prof-name"
+                  value={profileName}
+                  onChange={(e) => setProfileName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      saveProfile();
+                    }
+                  }}
+                  className={fieldClass}
+                  disabled={!profileRow}
+                  placeholder="Your display name"
+                />
               </div>
               <div className="space-y-1.5">
                 <Label htmlFor="prof-email">Email</Label>
-                <input id="prof-email" defaultValue={user?.email ?? ""} className={fieldClass} disabled />
+                <input id="prof-email" value={user?.email ?? ""} className={fieldClass} disabled readOnly />
+                <p className="text-xs text-muted-foreground">Your sign-in email is managed by authentication and can't be changed here.</p>
               </div>
               <div className="space-y-1.5">
                 <Label htmlFor="prof-role">Role</Label>
-                <input id="prof-role" defaultValue={user?.role ?? ""} className={fieldClass} disabled />
+                <input id="prof-role" value={user?.role ?? ""} className={fieldClass} disabled readOnly />
+                <p className="text-xs text-muted-foreground">Your role and access are set under Users &amp; Roles.</p>
               </div>
-              <p className="text-xs text-muted-foreground">Profile details come from your signed-in session.</p>
+              {profileRow ? (
+                <div className="flex justify-end pt-2">
+                  <Button onClick={saveProfile} disabled={!nameDirty}>Save changes</Button>
+                </div>
+              ) : (
+                <p className="text-xs text-muted-foreground">
+                  Your session isn't linked to a managed user profile, so it can't be edited here.
+                </p>
+              )}
             </CardContent>
           </Card>
         </TabsContent>
