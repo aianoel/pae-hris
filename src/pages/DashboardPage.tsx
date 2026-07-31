@@ -1,3 +1,4 @@
+import * as React from "react";
 import { useNavigate } from "react-router-dom";
 import { Download, Plus, Sparkles } from "lucide-react";
 
@@ -18,14 +19,31 @@ import { useToast } from "@/components/ui/toast";
 import { useStore } from "@/store/store-context";
 import { useAuth } from "@/store/auth-context";
 import { downloadCsv } from "@/lib/export";
+import {
+  attendanceByWeekdayFrom,
+  departmentDistributionFrom,
+  employeeGrowthFrom,
+} from "@/lib/analytics";
 import { kpis, type Kpi } from "@/lib/data";
 
 export function DashboardPage() {
   const navigate = useNavigate();
   const { toast } = useToast();
-  const { employees, departments } = useStore();
+  const { employees, departments, attendance } = useStore();
   const { user } = useAuth();
   const firstName = (user?.name ?? "there").split(" ")[0];
+
+  // Same derivations as the Analytics page, so the two screens can never
+  // disagree about headcount or attendance.
+  const growth = React.useMemo(() => employeeGrowthFrom(employees, 12), [employees]);
+  const distribution = React.useMemo(
+    () => departmentDistributionFrom(employees, departments),
+    [employees, departments],
+  );
+  const attendanceSeries = React.useMemo(
+    () => attendanceByWeekdayFrom(attendance),
+    [attendance],
+  );
 
   // Live stat card derived from the store, so it stays accurate in an empty
   // workspace where the curated mock `kpis` array is empty.
@@ -117,11 +135,11 @@ export function DashboardPage() {
             </Tabs>
           }
         >
-          <EmployeeGrowthChart />
+          <EmployeeGrowthChart data={growth} />
         </ChartCard>
 
         <ChartCard title="By department" description="Headcount distribution">
-          <DepartmentDonut />
+          <DepartmentDonut data={distribution} />
         </ChartCard>
       </div>
 
@@ -131,7 +149,7 @@ export function DashboardPage() {
           description="Present, remote, and absent this week"
           className="lg:col-span-2"
         >
-          <AttendanceChart />
+          <AttendanceChart data={attendanceSeries} />
         </ChartCard>
 
         {/* Activity + AI insight */}
