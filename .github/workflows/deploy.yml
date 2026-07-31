@@ -1,0 +1,74 @@
+name: Deploy to Vercel
+
+# Preview deploys for pull requests, production deploys for pushes to main.
+# Builds happen here rather than on Vercel (`vercel build` + `deploy --prebuilt`)
+# so the same commit that passes CI is the artifact that ships.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # Manual re-deploy of the current main, e.g. after rotating an env var.
+  workflow_dispatch:
+
+# Vercel CLI reads these to identify the project without a linked .vercel dir
+# (that folder is gitignored, so CI has no other way to know the target).
+env:
+  VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+  VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+
+# One deploy at a time per branch; a newer push supersedes an in-flight run.
+# Production is never cancelled mid-flight, only queued behind its predecessor.
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # Production only for direct pushes to main; every PR gets a preview URL.
+    environment: ${{ github.event_name == 'pull_request' && 'preview' || 'production' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run lint
+
+      - name: Install Vercel CLI
+        run: npm i -g vercel@latest
+
+      # Pulls project settings AND environment variables from Vercel, so the
+      # Supabase keys live in the Vercel dashboard only — they never need to be
+      # duplicated as GitHub secrets. VITE_* vars are inlined at build time.
+      - name: Pull Vercel environment
+        run: >-
+          vercel pull --yes
+          --environment=${{ github.event_name == 'pull_request' && 'preview' || 'production' }}
+          --token=${{ secrets.VERCEL_TOKEN }}
+
+      - name: Build
+        run: >-
+          vercel build
+          ${{ github.event_name == 'pull_request' && '' || '--prod' }}
+          --token=${{ secrets.VERCEL_TOKEN }}
+
+      - name: Deploy
+        id: deploy
+        run: >-
+          echo "url=$(vercel deploy --prebuilt
+          ${{ github.event_name == 'pull_request' && '' || '--prod' }}
+          --token=${{ secrets.VERCEL_TOKEN }})" >> "$GITHUB_OUTPUT"
+
+      - name: Summarise
+        run: |
+          echo "### Deployed :rocket:" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "${{ steps.deploy.outputs.url }}" >> "$GITHUB_STEP_SUMMARY"
