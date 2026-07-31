@@ -31,7 +31,8 @@ import {
   grossPay,
   totalDeductions,
   netPay,
-  statutoryBreakdown,
+  statutoryFor,
+  ancillaryFor,
   type PayrollRow,
 } from "@/lib/payroll";
 
@@ -119,10 +120,16 @@ export function EmployeePayrollPanel({
 
                 {/* Overview */}
                 <TabsContent value="overview" className="space-y-4">
+                  {/* Drawn from the row's own timekeeping drivers — the counts
+                      the attendance import resolved — so this agrees with the
+                      deductions on the Statutory tab instead of contradicting
+                      them with placeholder figures. */}
                   <Section icon={CalendarCheck} title="Attendance Summary">
-                    <Row label="Days present" value="21 / 22" />
-                    <Row label="Overtime hours" value="12h" />
-                    <Row label="Late / Undertime" value="2 incidents" />
+                    <Row label="Overtime hours" value={`${row.overtimeHours}h`} />
+                    <Row label="Night differential" value={`${row.nightDiffHours}h`} />
+                    <Row label="Absent (no leave filed)" value={`${row.absentDays} d`} />
+                    <Row label="Days lost to lateness" value={`${row.tardyDays} d`} />
+                    <Row label="Approved unpaid leave" value={`${row.lwopDays} d`} />
                   </Section>
                   <Section icon={Plane} title="Leave Summary">
                     <Row label="Vacation balance" value="8 days" />
@@ -156,7 +163,7 @@ export function EmployeePayrollPanel({
                     and BASE TAX lines. */}
                 <TabsContent value="statutory" className="space-y-4">
                   {(() => {
-                    const stat = statutoryBreakdown(row.basic);
+                    const stat = statutoryFor(row);
                     return (
                       <>
                         <Section icon={Landmark} title="Government Contributions">
@@ -168,10 +175,76 @@ export function EmployeePayrollPanel({
                             value={formatCurrency(stat.sss + stat.philHealth + stat.pagIbig)}
                             tone="neg"
                           />
+                          {/* The base each bracket was matched on — basic pay plus
+                              whatever the Contribution Matrix includes — so the
+                              chosen bracket is explainable, not just asserted. */}
+                          <p className="pt-2 text-xs text-muted-foreground">
+                            Bracketed on {formatCurrency(stat.base.SSS)} (SSS) ·{" "}
+                            {formatCurrency(stat.base.PhilHealth)} (PhilHealth) ·{" "}
+                            {formatCurrency(stat.base["Pag-IBIG"])} (HDMF)
+                          </p>
+                          {stat.unmatched.length > 0 && (
+                            <p className="pt-1 text-xs text-amber-600">
+                              No configured bracket for {stat.unmatched.join(", ")} — the
+                              built-in statutory formula was used. Add the band under
+                              Contributions.
+                            </p>
+                          )}
                         </Section>
+                        {/* Loan lines from the employee's actual Loans-page and
+                            ledger records. An employee with no loans on file is
+                            deducted nothing here — nothing is synthesised. */}
                         <Section icon={Banknote} title="Loans">
-                          <Row label="Company loan" value={formatCurrency(row.loans)} tone="neg" />
-                          <Row label="Cash advance" value={formatCurrency(row.cashAdvance)} tone="neg" />
+                          {(() => {
+                            const a = ancillaryFor(row);
+                            const lines: [string, number][] = [
+                              ["SSS loan", a.sssLoan],
+                              ["HDMF (Pag-IBIG) loan", a.hdmfLoan],
+                              ["PECEWA loan", a.pecewaLoan],
+                              ["Cooperative loan", a.coopLoan],
+                              ["Pag-IBIG additional", a.pagibigAd],
+                              ["Other loans", a.otherLoans],
+                            ];
+                            const active = lines.filter(([, amount]) => amount > 0);
+                            return (
+                              <>
+                                {active.length === 0 && (
+                                  <p className="py-1 text-sm text-muted-foreground">
+                                    No loans on file for this employee.
+                                  </p>
+                                )}
+                                {active.map(([label, amount]) => (
+                                  <Row key={label} label={label} value={formatCurrency(amount)} tone="neg" />
+                                ))}
+                                <Row label="Total loans" value={formatCurrency(row.loans)} tone="neg" />
+                                <Row label="Cash advance" value={formatCurrency(row.cashAdvance)} tone="neg" />
+                              </>
+                            );
+                          })()}
+                        </Section>
+                        {/* Unpaid time, itemised by cause — each charged from its
+                            own count, so a day never lands on two lines. */}
+                        <Section icon={CalendarCheck} title="Unpaid Time">
+                          <Row
+                            label={`Absent, no leave filed (${row.absentDays} d)`}
+                            value={formatCurrency(row.absences)}
+                            tone="neg"
+                          />
+                          <Row
+                            label={`Late arrivals (${row.tardyDays} d)`}
+                            value={formatCurrency(row.late)}
+                            tone="neg"
+                          />
+                          <Row
+                            label={`Approved unpaid leave (${row.lwopDays} d)`}
+                            value={formatCurrency(row.lwop)}
+                            tone="neg"
+                          />
+                          <Row
+                            label={`Undertime (${row.undertimeMinutes} min)`}
+                            value={formatCurrency(row.undertime)}
+                            tone="neg"
+                          />
                         </Section>
                         <Section icon={Receipt} title="Tax Information">
                           {/* Withholding is computed on basic net of the three
@@ -179,7 +252,7 @@ export function EmployeePayrollPanel({
                           <Row
                             label="Taxable income"
                             value={formatCurrency(
-                              Math.max(0, row.basic - (stat.sss + stat.philHealth + stat.pagIbig)),
+                              Math.max(0, stat.base.Tax - (stat.sss + stat.philHealth + stat.pagIbig)),
                             )}
                           />
                           <Row label="Withholding tax" value={formatCurrency(stat.tax)} tone="neg" />

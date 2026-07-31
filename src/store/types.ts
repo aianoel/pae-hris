@@ -36,7 +36,12 @@ export interface Agency {
   logo?: string;
 }
 
-export type AttendanceState = "present" | "remote" | "absent";
+/**
+ * A day's attendance outcome. `on-leave` is distinct from `absent` on purpose:
+ * an approved leave day is accounted for, so payroll must not treat it as an
+ * unexplained absence and dock pay for it — see `src/lib/leaveRecords.ts`.
+ */
+export type AttendanceState = "present" | "remote" | "absent" | "on-leave";
 
 /** A single employee's status for a specific calendar day. */
 export interface AttendanceRecord {

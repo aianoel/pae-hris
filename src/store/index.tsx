@@ -5,7 +5,10 @@ import { employees as seedEmployees } from "@/lib/data";
 import {
   seedContributionRates,
   computeTotal,
+  defaultEarningsMatrix,
+  toggleEarning,
   type ContributionRate,
+  type EarningsMatrix,
 } from "@/lib/contributions";
 import {
   seedLoans,
@@ -20,6 +23,7 @@ import {
   type LoanEntry,
 } from "@/lib/employeeLoans";
 import { normalizeCode, normalizeAgencies, type LeaveType } from "@/lib/leave";
+import type { LeaveRecord } from "@/lib/leaveRecords";
 import type {
   Employee,
   User,
@@ -56,7 +60,8 @@ import { StoreContext, type StoreValue } from "./store-context";
 // boundary — see the react-context-hmr note.
 export type { StoreValue } from "./store-context";
 import { errorMessage } from "@/lib/utils";
-import { grossPay, buildPayrollRows, payrollTotals, COMPONENT_KEYS, setContributionRates as setEngineRates, type PayrollComponents, type PayrollOverrides } from "@/lib/payroll";
+import { grossPay, buildPayrollRows, payrollTotals, COMPONENT_KEYS, setContributionRates as setEngineRates, setEarningsMatrix as setEngineMatrix, setDeductionInputs as setEngineDeductions, type PayrollComponents, type PayrollOverrides, type TimekeepingByEmployee } from "@/lib/payroll";
+import { buildPayrollDeductionInputs } from "@/lib/payrollInputs";
 import { ALL_AGENCIES, DIRECT_HIRE } from "@/lib/payrollReports";
 import { isSupabaseConfigured, shouldSeed, supabase } from "@/lib/supabase";
 import { detectDevice, getActiveActor, getActiveActorEmail, getCachedIp, resolvePublicIp } from "@/lib/clientInfo";
@@ -108,13 +113,25 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const [logs, setLogs] = React.useState<LogEntry[]>(seedLogs);
   const [contributionRates, setContributionRates] =
     React.useState<ContributionRate[]>(seedContributionRates);
+  // Contribution Matrix: which earning lines are added to basic pay to form each
+  // contribution's base. Lives in the store (not the Contributions page) because
+  // the payroll engine reads it — a matrix change must move what payroll deducts.
+  const [earningsMatrix, setEarningsMatrix] =
+    React.useState<EarningsMatrix>(defaultEarningsMatrix);
   const [loans, setLoans] = React.useState<Loan[]>(seedLoans);
   // Leave-type catalogue. Ships empty; HR/Admin populate it (the statutory PH
   // presets are one click away on the Leave page).
   const [leaveTypes, setLeaveTypes] = React.useState<LeaveType[]>([]);
+  // Filed leave applications. Approved records suppress the LWOP an attendance
+  // import would otherwise book for a day with no punch — see lib/leaveRecords.
+  const [leaveRecords, setLeaveRecords] = React.useState<LeaveRecord[]>([]);
   // Per-employee, tabbed Loans ledger (flat list; grouped per employee for the UI).
   const [employeeLoanEntries, setEmployeeLoanEntries] = React.useState<LoanEntry[]>([]);
-  const [lwopDaysByEmployee, setLwopDaysByEmployee] = React.useState<Record<string, number>>({});
+  // Itemised timekeeping from the latest biometric import: unpaid-leave days,
+  // unexcused absent days and pro-rated tardiness, per employee. Drives the
+  // LWOP / absences / late deductions on every payroll row.
+  const [timekeepingByEmployee, setTimekeepingByEmployee] =
+    React.useState<TimekeepingByEmployee>({});
   const [payrollOverrides, setPayrollOverrides] = React.useState<PayrollOverrides>({});
   const [agencies, setAgencies] = React.useState<Agency[]>(DEFAULT_AGENCIES);
 
@@ -124,6 +141,17 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   // 15/30). Done during render rather than in an effect so children reading
   // derived payroll on this same commit already see the current table.
   setEngineRates(contributionRates);
+  // Likewise the matrix: it decides each contribution's base, so an edit under
+  // Contributions → Matrix must be visible to payroll on this same commit.
+  setEngineMatrix(earningsMatrix);
+  // And the loan ledgers: recording a loan (or paying one off) must move what
+  // the next payroll run deducts. Memoised so the fold only re-runs when a
+  // ledger actually changes, not on every unrelated store render.
+  const deductionInputs = React.useMemo(
+    () => buildPayrollDeductionInputs(loans, employeeLoanEntries),
+    [loans, employeeLoanEntries],
+  );
+  setEngineDeductions(deductionInputs);
 
   // Ready immediately when there's no backend to wait for.
   const [ready, setReady] = React.useState(!isSupabaseConfigured);
@@ -188,7 +216,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           ...data.payrollRuns, ...data.payrollApprovals, ...data.reports,
           ...data.documents, ...data.roles, ...data.notifications, ...data.logs,
           ...data.contributionRates, ...data.loans, ...data.employeeLoanEntries,
-          ...data.leaveTypes,
+          ...data.leaveTypes, ...data.leaveRecords,
         ].map((r) => r.id));
 
         // If the backend is empty and seeding is enabled, push the seed data up
@@ -218,6 +246,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           setLoans(data.loans);
           setEmployeeLoanEntries(data.employeeLoanEntries);
           setLeaveTypes(data.leaveTypes);
+          setLeaveRecords(data.leaveRecords);
         }
       } catch (err) {
         // eslint-disable-next-line no-console
@@ -556,13 +585,17 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   );
 
   const setImportedLwop = React.useCallback<StoreValue["setImportedLwop"]>(
-    (daysByEmployee) => {
-      setLwopDaysByEmployee(daysByEmployee);
-      const total = Object.values(daysByEmployee).reduce((s, d) => s + d, 0);
+    (timekeeping) => {
+      setTimekeepingByEmployee(timekeeping);
+      const entries = Object.values(timekeeping);
+      const total = entries.reduce(
+        (s, t) => s + t.absentDays + t.unpaidLeaveDays + t.tardyDays,
+        0,
+      );
       addLog(
         "attendance",
-        `recorded LWOP for ${Object.keys(daysByEmployee).length} employee(s)`,
-        `${total} day(s)`,
+        `recorded unpaid time for ${entries.length} employee(s)`,
+        `${Math.round(total * 100) / 100} day(s)`,
       );
     },
     [addLog],
@@ -582,7 +615,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       // annual salary ÷ 12, which ignored overtime, allowances and edits and so
       // never matched the register the run was reviewed against. buildPayrollRows
       // also drops inactive employees, so the headcount is who is really paid.
-      const rows = buildPayrollRows(scoped, lwopDaysByEmployee, payrollOverrides);
+      const rows = buildPayrollRows(scoped, timekeepingByEmployee, payrollOverrides);
       const gross = Math.round(payrollTotals(rows).gross);
       const scopeNote = agency === undefined ? "" : ` (${agency || "Direct hire"})`;
       const run: PayrollRun = {
@@ -607,7 +640,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         persist(() => db.upsertPayrollRun(processed));
       }, 2500);
     },
-    [employees, lwopDaysByEmployee, payrollOverrides, addLog, persist],
+    [employees, timekeepingByEmployee, payrollOverrides, addLog, persist],
   );
 
   const markPayrollPaid = React.useCallback<StoreValue["markPayrollPaid"]>(
@@ -1023,6 +1056,25 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     [addLog, persist, contributionRates],
   );
 
+  // ---- Contribution matrix -----------------------------------------------
+  // Toggling an earning in/out of a contribution's base changes what every
+  // payroll screen deducts, so these log like any other payroll config change.
+  const toggleMatrixEarning = React.useCallback<StoreValue["toggleMatrixEarning"]>(
+    (type, code) => {
+      setEarningsMatrix((m) => toggleEarning(m, type, code));
+      addLog("payroll", `toggled ${code} in the ${type} contribution base`);
+    },
+    [addLog],
+  );
+
+  const setMatrixEarnings = React.useCallback<StoreValue["setMatrixEarnings"]>(
+    (type, codes) => {
+      setEarningsMatrix((m) => ({ ...m, [type]: codes }));
+      addLog("payroll", `set the ${type} contribution base to ${codes.length} earning(s)`);
+    },
+    [addLog],
+  );
+
   // ---- Leave types -------------------------------------------------------
   // The catalogue of leave categories (Vacation, Sick, …), each scoped to the
   // agencies it applies to. Creating/editing is gated to HR + Administrator in
@@ -1101,6 +1153,72 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       return created.length;
     },
     [addLog, persist],
+  );
+
+  // ---- Leave records (filed applications) --------------------------------
+  // `payRule` and the type's name/code are snapshotted from the catalogue at
+  // filing time: a record is a historical fact, so re-pricing "Vacation Leave"
+  // from paid to unpaid next year must not retroactively dock leave already
+  // taken. See the module note in lib/leaveRecords.
+  const fileLeave = React.useCallback<StoreValue["fileLeave"]>(
+    (draft) => {
+      const type = leaveTypes.find((t) => t.id === draft.leaveTypeId);
+      if (!type) return null;
+      const created: LeaveRecord = {
+        ...draft,
+        id: nextId("LVR"),
+        leaveTypeName: type.name,
+        leaveTypeCode: type.code,
+        payRule: type.payRule,
+        // A record filed as already-approved is decided by whoever filed it.
+        decidedBy: draft.status === "approved" ? getActiveActor() : "",
+        decidedAt: draft.status === "approved" ? new Date().toISOString() : "",
+        createdAt: new Date().toISOString(),
+      };
+      setLeaveRecords((prev) => [created, ...prev]);
+      persist(() => db.upsertLeaveRecord(created));
+      addLog(
+        "employee",
+        `filed ${type.code} leave for ${draft.employeeName} (${draft.startDate} to ${draft.endDate})`,
+        created.id,
+      );
+      return created;
+    },
+    [addLog, persist, leaveTypes],
+  );
+
+  const decideLeave = React.useCallback<StoreValue["decideLeave"]>(
+    (id, status) => {
+      let updated: LeaveRecord | undefined;
+      setLeaveRecords((prev) =>
+        prev.map((r) => {
+          if (r.id !== id) return r;
+          updated = {
+            ...r,
+            status,
+            // Reverting to pending clears the decision so the audit trail never
+            // claims someone approved a record that is awaiting a decision.
+            decidedBy: status === "pending" ? "" : getActiveActor(),
+            decidedAt: status === "pending" ? "" : new Date().toISOString(),
+          };
+          return updated;
+        }),
+      );
+      if (!updated) return;
+      persist(() => db.upsertLeaveRecord(updated!));
+      addLog("employee", `${status} ${updated.leaveTypeCode} leave for ${updated.employeeName}`, id);
+    },
+    [addLog, persist],
+  );
+
+  const removeLeaveRecord = React.useCallback<StoreValue["removeLeaveRecord"]>(
+    (id) => {
+      const removed = leaveRecords.find((r) => r.id === id);
+      setLeaveRecords((prev) => prev.filter((r) => r.id !== id));
+      persist(() => db.deleteLeaveRecord(id));
+      addLog("employee", `deleted leave record for ${removed?.employeeName ?? id}`, id);
+    },
+    [addLog, persist, leaveRecords],
   );
 
   // ---- Loans -------------------------------------------------------------
@@ -1250,7 +1368,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     headcountFor,
     setAttendance: setAttendanceState,
     importAttendance,
-    lwopDaysByEmployee,
+    timekeepingByEmployee,
     setImportedLwop,
     runPayroll,
     markPayrollPaid,
@@ -1291,6 +1409,13 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     updateLeaveType,
     removeLeaveType,
     addLeaveTypes,
+    leaveRecords,
+    fileLeave,
+    decideLeave,
+    removeLeaveRecord,
+    earningsMatrix,
+    toggleMatrixEarning,
+    setMatrixEarnings,
     employeeLoanEntries,
     loansForEmployee,
     addEmployeeLoanEntry,

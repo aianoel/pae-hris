@@ -5,11 +5,20 @@
  * durations, plus a per-employee summary line.
  *
  * TOTAL OF DUTY = (time out − time in) − 1 hour lunch, in decimal hours. A day
- * with fewer than two punches contributes 0. Late / undertime / deduction /
- * excess require a shift schedule the app doesn't model, so they render as zero
- * (matching the sample, where no schedule was configured).
+ * with fewer than two punches contributes 0.
+ *
+ * LATE and TOTAL FOR DEDUCTION come from the company 09:00 shift-start rule
+ * (see lib/tardiness.ts): the time missed by arriving late is deducted pro-rata
+ * against the 8-hour day, and TOTAL FOR DEDUCTION is that figure in days — the
+ * same number the payroll LWOP deduction is computed from, so the report and the
+ * payslip agree. A day marked `on-leave` is exempt: approved leave means the
+ * employee wasn't expected in, so there is no shift to be late for.
+ *
+ * UNDERTIME (leaving before the shift ends) needs a shift *end* the app doesn't
+ * model yet, so it stays zero rather than guessing one.
  */
 import type { AttendanceRecord, Employee } from "@/store/types";
+import { formatLateness, lateDayFraction, latenessSeconds, roundDays } from "@/lib/tardiness";
 
 /** Paid lunch break deducted from raw duty time, in hours. */
 const LUNCH_HOURS = 1;
@@ -18,11 +27,13 @@ export interface TelecomDayRow {
   date: string; // ISO YYYY-MM-DD
   timeIn: string; // "H:MM AM" or "" when absent
   timeOut: string;
-  late: string; // "HH:MM"
-  undertime: string; // "0.00"
-  deduction: string; // "0.00"
-  excess: string; // "HH:MM" excess after 09:00
+  late: string; // "1h 25m", or "—" when on time
+  undertime: string; // "0.00" — needs a shift end the app doesn't model
+  deduction: string; // days deducted for lateness, e.g. "0.0938"
+  excess: string; // "HH:MM" time worked past 09:00 arrival
   dutyHours: number; // decimal hours
+  /** True when approved leave covered this day — exempt from a late charge. */
+  onLeave: boolean;
 }
 
 export interface TelecomEmployeeReport {
@@ -30,11 +41,15 @@ export interface TelecomEmployeeReport {
   employeeName: string;
   bioId: string;
   days: TelecomDayRow[];
-  totalLate: string; // "HH:MM"
+  totalLate: string; // summed lateness, e.g. "3h 45m"
   totalUndertime: string; // "0.00"
-  totalDeduction: string; // "0.00"
+  totalDeduction: string; // total days deducted for lateness
   totalExcess: string; // "HH:MM"
   totalDuty: number; // sum of dutyHours, decimal
+  /** Days with a late first punch — the headline tardiness count. */
+  lateCount: number;
+  /** Days covered by approved leave in the period. */
+  leaveDays: number;
 }
 
 /** ISO date → seconds since midnight for an `HH:MM:SS` time string. */
@@ -106,6 +121,11 @@ export function buildTelecomReport(
     const byDate = new Map(recs.map((r) => [r.date, r]));
 
     let totalDuty = 0;
+    let totalLateSec = 0;
+    let totalDeductionDays = 0;
+    let lateCount = 0;
+    let leaveDays = 0;
+
     const days: TelecomDayRow[] = allDays.map((date) => {
       const rec = byDate.get(date);
       const inSec = toSeconds(rec?.timeIn);
@@ -116,15 +136,30 @@ export function buildTelecomReport(
         dutyHours = Math.round(dutyHours * 100) / 100;
       }
       totalDuty += dutyHours;
+
+      // Approved leave exempts the day: the employee wasn't due in, so an
+      // incidental punch must not read as a late arrival.
+      const onLeave = rec?.state === "on-leave";
+      const lateSec = onLeave || inSec == null ? 0 : latenessSeconds(inSec);
+      const deductionDays = onLeave || inSec == null ? 0 : lateDayFraction(inSec);
+      if (onLeave) leaveDays += 1;
+      if (lateSec > 0) {
+        lateCount += 1;
+        totalLateSec += lateSec;
+        totalDeductionDays += deductionDays;
+      }
+
       return {
         date,
         timeIn: to12h(rec?.timeIn),
         timeOut: to12h(rec?.timeOut),
-        late: "00:00",
+        late: formatLateness(lateSec),
         undertime: "0.00",
-        deduction: "0.00",
-        excess: "00:00",
+        deduction: deductionDays > 0 ? String(roundDays(deductionDays)) : "0.00",
+        // Time on the clock past the 09:00 arrival — the mirror of `late`.
+        excess: lateSec > 0 ? formatLateness(lateSec) : "00:00",
         dutyHours,
+        onLeave,
       };
     });
 
@@ -133,11 +168,13 @@ export function buildTelecomReport(
       employeeName,
       bioId,
       days,
-      totalLate: "00:00",
+      totalLate: formatLateness(totalLateSec),
       totalUndertime: "0.00",
-      totalDeduction: "0.00",
-      totalExcess: "00:00",
+      totalDeduction: totalDeductionDays > 0 ? String(roundDays(totalDeductionDays)) : "0.00",
+      totalExcess: formatLateness(totalLateSec),
       totalDuty: Math.round(totalDuty * 100) / 100,
+      lateCount,
+      leaveDays,
     });
   }
 

@@ -64,9 +64,11 @@ export function PayrollEntryPage() {
   const {
     employees,
     addLog,
-    lwopDaysByEmployee,
+    timekeepingByEmployee,
     payrollOverrides,
     contributionRates,
+    loans,
+    employeeLoanEntries,
     payrollApprovals,
     approvePayroll,
     disapprovePayroll,
@@ -93,13 +95,23 @@ export function PayrollEntryPage() {
   const [panelOpen, setPanelOpen] = React.useState(false);
   const [bulkOpen, setBulkOpen] = React.useState(false);
 
-  // Undo/redo history of the row set. LWOP days from the latest biometric
-  // attendance import (keyed by employee id) override the seeded stand-in.
+  // Undo/redo history of the row set. Unpaid time (LWOP / absences / late) comes
+  // from the latest biometric attendance import, keyed by employee id.
   const base = React.useMemo(
-    () => buildPayrollRows(employees, lwopDaysByEmployee, payrollOverrides),
+    () => buildPayrollRows(employees, timekeepingByEmployee, payrollOverrides),
     // contributionRates: Government Deductions is derived from the configured
     // SSS/PhilHealth/HDMF/Tax brackets, so a rate edit must rebuild the grid.
-    [employees, lwopDaysByEmployee, payrollOverrides, contributionRates],
+    // loans/employeeLoanEntries: the engine reads the resolved loan deductions
+    // from module state (see setDeductionInputs), so a ledger change is not
+    // visible in the grid unless it also invalidates this memo.
+    [
+      employees,
+      timekeepingByEmployee,
+      payrollOverrides,
+      contributionRates,
+      loans,
+      employeeLoanEntries,
+    ],
   );
   const [history, setHistory] = React.useState<PayrollRow[][]>([base]);
   const [cursor, setCursor] = React.useState(0);

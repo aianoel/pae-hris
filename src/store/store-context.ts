@@ -19,11 +19,25 @@ import type {
   LogEntry,
   LogType,
 } from "./types";
-import type { ContributionRate, ContributionType } from "@/lib/contributions";
+import type {
+  ContributionRate,
+  ContributionType,
+  EarningCode,
+  EarningsMatrix,
+} from "@/lib/contributions";
 import type { Loan } from "@/lib/loans";
 import type { LeaveType, LeaveTypeDraft } from "@/lib/leave";
+import type {
+  LeaveRecord,
+  LeaveRecordStatus,
+  NewLeaveRecord,
+} from "@/lib/leaveRecords";
 import type { LoanEntry, EmployeeLoans, NewLoanEntry } from "@/lib/employeeLoans";
-import type { PayrollRow, PayrollOverrides } from "@/lib/payroll";
+import type {
+  PayrollRow,
+  PayrollOverrides,
+  TimekeepingByEmployee,
+} from "@/lib/payroll";
 
 /**
  * Store context + hook, kept in a component-free module.
@@ -93,10 +107,15 @@ export interface StoreValue {
   importAttendance: (
     records: Omit<AttendanceRecord, "id">[],
   ) => { added: number; updated: number };
-  /** LWOP days per employee id, derived from the last biometric import. */
-  lwopDaysByEmployee: Record<string, number>;
-  /** Store computed LWOP days (from an attendance import) for payroll to pick up. */
-  setImportedLwop: (daysByEmployee: Record<string, number>) => void;
+  /**
+   * Itemised unpaid time per employee id from the last biometric import —
+   * unpaid-leave days, unexcused absent days and pro-rated tardiness. Payroll
+   * charges each on its own deduction line (LWOP / absences / late), so a day
+   * is never docked twice. Approved paid leave never appears here.
+   */
+  timekeepingByEmployee: TimekeepingByEmployee;
+  /** Store the computed timekeeping (from an attendance import) for payroll. */
+  setImportedLwop: (timekeeping: TimekeepingByEmployee) => void;
 
   // Payroll
   /**
@@ -180,6 +199,18 @@ export interface StoreValue {
     year?: number;
   }) => number;
 
+  // Contribution matrix (which earnings form each contribution's base)
+  /**
+   * Which earning codes are added to basic pay when computing each
+   * contribution's base. Read by the payroll engine, so editing it changes what
+   * payroll actually deducts — not just a display setting.
+   */
+  earningsMatrix: EarningsMatrix;
+  /** Include/exclude one earning code in a contribution's base. */
+  toggleMatrixEarning: (type: ContributionType, code: EarningCode) => void;
+  /** Replace a contribution's whole earning set (Select all / Clear). */
+  setMatrixEarnings: (type: ContributionType, codes: EarningCode[]) => void;
+
   // Loans
   /**
    * Register a loan. `id` and `monthlyAmortization` are assigned here — the
@@ -209,6 +240,24 @@ export interface StoreValue {
   removeLeaveType: (id: string) => void;
   /** Create several leave types at once (the statutory presets). Returns the count added. */
   addLeaveTypes: (drafts: LeaveTypeDraft[]) => number;
+
+  // Leave records (filed applications, as distinct from the type catalogue)
+  /** Every filed leave application, newest first. */
+  leaveRecords: LeaveRecord[];
+  /**
+   * File a leave application. The type's name, code and pay rule are
+   * snapshotted onto the record so later catalogue edits can't re-price leave
+   * already taken. Returns null when the leave type no longer exists.
+   */
+  fileLeave: (draft: NewLeaveRecord) => LeaveRecord | null;
+  /**
+   * Approve/reject/cancel a filed application. Only `approved` records suppress
+   * an LWOP deduction, so this is the action that decides whether a leave day
+   * costs the employee pay.
+   */
+  decideLeave: (id: string, status: LeaveRecordStatus) => void;
+  /** Permanently remove a filed application. */
+  removeLeaveRecord: (id: string) => void;
 
   // Employee loan entries (per-employee, tabbed Loans ledger)
   /** Every employee's loan-ledger lines (flat; group per employee with groupByTab). */

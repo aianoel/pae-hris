@@ -10,13 +10,36 @@
  *     10256   2026-07-13 06:30:25   1   1   10256   I   0
  *
  * From the punches we derive, over the file's date range:
- *   • one attendance record per employee per weekday (present if they punched,
- *     absent otherwise);
- *   • LWOP days  = working days (Mon–Fri) in range with no punch;
+ *   • one attendance record per employee per weekday (present, on-leave when
+ *     covered by approved leave, absent otherwise);
+ *   • LWOP days, from three sources:
+ *       – whole days with no punch and no approved leave (unexplained absence);
+ *       – whole days of approved **unpaid** leave (filed as unpaid, so it
+ *         deducts — but traceably, rather than looking like an absence);
+ *       – **fractions** of a day lost to arriving after the 09:00 shift start,
+ *         pro-rated against the 8-hour day (see lib/tardiness.ts);
  *   • LWOP amount = daily rate × LWOP days, daily rate = (Monthly × 12) / 261.
+ *
+ * Approved **paid** leave is excluded from LWOP entirely: that is the whole
+ * point of filing it. A day of approved leave also never accrues a tardiness
+ * charge — the employee was not expected in, so there is no shift to be late
+ * for, and a stray punch on a leave day (dropping by the office) must not
+ * become a deduction.
  */
 import type { Employee, AttendanceState } from "@/store/types";
 import { dailyRateFromMonthly } from "@/lib/payroll";
+import {
+  lateDayFraction,
+  latenessSeconds,
+  roundDays,
+  SHIFT_START_SEC,
+} from "@/lib/tardiness";
+import {
+  buildLeaveIndex,
+  leaveOn,
+  type LeaveDay,
+  type LeaveRecord,
+} from "@/lib/leaveRecords";
 
 /** A resolved attendance record ready to upsert into the store. */
 export interface ParsedAttendance {
@@ -38,7 +61,23 @@ export interface LwopResult {
   bioId: string;
   monthly: number;
   presentDays: number;
+  /**
+   * Total LWOP days charged: unexplained absences + unpaid-leave days +
+   * the pro-rated fractions from late arrivals. Fractional by design.
+   */
   lwopDays: number;
+  /** Whole days with no punch and no approved leave. */
+  absentDays: number;
+  /** Whole days of approved unpaid leave (deducts, but explained). */
+  unpaidLeaveDays: number;
+  /** Whole days of approved paid leave — excluded from LWOP. */
+  paidLeaveDays: number;
+  /** Days lost to arriving after 09:00, summed as fractions of a day. */
+  tardyDays: number;
+  /** How many days had a late first punch (headline count, not a duration). */
+  lateCount: number;
+  /** Total seconds late across the period, for reporting. */
+  lateSeconds: number;
   amount: number; // PHP, rounded to 2 decimals
 }
 
@@ -69,7 +108,20 @@ function eachDate(from: Date, to: Date): Date[] {
   return out;
 }
 
-const isoDate = (d: Date) => d.toISOString().slice(0, 10);
+/**
+ * Format a Date as ISO `YYYY-MM-DD` in **local** time.
+ *
+ * Not `toISOString()`: that converts to UTC first, so in UTC+8 (Philippines) a
+ * local midnight reads back as the *previous* day — which would shift every
+ * attendance record and mis-align it against a leave record's dates.
+ */
+function isoDate(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
 const isWorkingDay = (d: Date) => d.getDay() >= 1 && d.getDay() <= 5; // Mon–Fri
 
 /** Earliest / latest punch time (seconds since midnight + "HH:MM:SS") per day. */
@@ -80,7 +132,19 @@ interface DayPunch {
   lastStr: string;
 }
 
-export function parseAttendanceText(text: string, employees: Employee[]): ParseResult {
+/**
+ * Parse a device log into attendance records and LWOP.
+ *
+ * `leaveRecords` are the filed leave applications; approved ones suppress the
+ * deduction a missing punch would otherwise cause. Omit them and every
+ * punch-less working day is charged as an unexplained absence, which is the
+ * correct behaviour for a workspace that isn't tracking leave yet.
+ */
+export function parseAttendanceText(
+  text: string,
+  employees: Employee[],
+  leaveRecords: LeaveRecord[] = [],
+): ParseResult {
   const errors: string[] = [];
   // bioId -> (ISO date -> first/last punch of that day)
   const punches = new Map<string, Map<string, DayPunch>>();
@@ -137,6 +201,8 @@ export function parseAttendanceText(text: string, employees: Employee[]): ParseR
 
   // Resolve each punched Bio ID to an employee.
   const byBio = new Map(employees.filter((e) => e.bioId).map((e) => [e.bioId as string, e]));
+  // Approved leave, indexed by `employeeId|date` for O(1) lookup per day.
+  const leaveIndex = buildLeaveIndex(leaveRecords);
 
   const records: ParsedAttendance[] = [];
   const lwop: LwopResult[] = [];
@@ -149,16 +215,47 @@ export function parseAttendanceText(text: string, employees: Employee[]): ParseR
       continue;
     }
 
-    // Attendance: one record per working day in range (present / absent).
+    let presentDays = 0;
+    let absentDays = 0;
+    let paidLeaveDays = 0;
+    let unpaidLeaveDays = 0;
+    let tardyDays = 0;
+    let lateCount = 0;
+    let lateSeconds = 0;
+
+    // Attendance: one record per working day in range.
     for (const d of workingDates) {
-      const punch = dates.get(isoDate(d));
+      const iso = isoDate(d);
+      const punch = dates.get(iso);
+      const leave: LeaveDay | undefined = leaveOn(leaveIndex, emp.id, iso);
+
+      // Approved leave wins over the punch data: the day is accounted for, so it
+      // is neither an absence nor a tardiness event. Paid leave costs nothing;
+      // unpaid leave deducts a whole day, which is what filing it as unpaid means.
+      if (leave) {
+        if (leave.payRule === "paid") paidLeaveDays += 1;
+        else unpaidLeaveDays += 1;
+      } else if (punch) {
+        presentDays += 1;
+        // Late arrival: charge the time missed, pro-rated against the 8-hour day.
+        const late = latenessSeconds(punch.firstSec);
+        if (late > 0) {
+          lateCount += 1;
+          lateSeconds += late;
+          tardyDays += lateDayFraction(punch.firstSec);
+        }
+      } else {
+        absentDays += 1;
+      }
+
+      const state: AttendanceState = leave ? "on-leave" : punch ? "present" : "absent";
       records.push({
         employeeId: emp.id,
         employeeName: emp.name,
         department: emp.department,
-        date: isoDate(d),
+        date: iso,
         day: SHORT_DAY[d.getDay()],
-        state: punch ? "present" : "absent",
+        state,
         bioId,
         timeIn: punch?.firstStr,
         // Only surface a time-out when there's a distinct later punch.
@@ -166,16 +263,23 @@ export function parseAttendanceText(text: string, employees: Employee[]): ParseR
       });
     }
 
-    const presentWorking = workingDates.filter((d) => dates.has(isoDate(d))).length;
-    const lwopDays = workingDates.length - presentWorking;
+    // Fractions are kept to 4 dp so a month of small delays accumulates exactly
+    // instead of each day rounding away to zero; only the peso figure rounds.
+    const lwopDays = roundDays(absentDays + unpaidLeaveDays + tardyDays);
     const monthly = Math.round(emp.salary / 12);
     lwop.push({
       employeeId: emp.id,
       employeeName: emp.name,
       bioId,
       monthly,
-      presentDays: presentWorking,
+      presentDays,
       lwopDays,
+      absentDays,
+      unpaidLeaveDays,
+      paidLeaveDays,
+      tardyDays: roundDays(tardyDays),
+      lateCount,
+      lateSeconds,
       amount: Math.round(dailyRateFromMonthly(monthly) * lwopDays * 100) / 100,
     });
   }
@@ -191,3 +295,6 @@ export function parseAttendanceText(text: string, employees: Employee[]): ParseR
     workingDays: workingDates.length,
   };
 }
+
+/** Re-exported so consumers can label the shift-start rule without a second import. */
+export { SHIFT_START_SEC };

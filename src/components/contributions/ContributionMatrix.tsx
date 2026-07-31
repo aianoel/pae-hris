@@ -100,8 +100,10 @@ export function ContributionMatrix({ matrix, onToggle, onSetAll }: ContributionM
           <div>
             <h3 className="text-sm font-semibold text-foreground">Earnings Affected</h3>
             <p className="text-xs text-muted-foreground">
-              Included in the base for{" "}
+              Added to basic pay to form the base for{" "}
               <span className="font-medium text-foreground">{CONTRIBUTION_DISPLAY_NAME[selectedType]}</span>
+              . Payroll brackets against this base, so a change here moves what is
+              deducted.
             </p>
           </div>
           <div className="flex items-center gap-2">

@@ -32,7 +32,9 @@ CREATE EXTENSION IF NOT EXISTS citext;
 -- -----------------------------------------------------------------------------
 CREATE TYPE user_status        AS ENUM ('active', 'inactive');
 CREATE TYPE employee_status    AS ENUM ('active', 'on-leave', 'inactive');
-CREATE TYPE attendance_state   AS ENUM ('present', 'remote', 'absent');
+-- 'on-leave' is distinct from 'absent': an approved leave day is accounted for,
+-- so payroll must not book it as LWOP (see db/migrations/015_leave_records.sql).
+CREATE TYPE attendance_state   AS ENUM ('present', 'remote', 'absent', 'on-leave');
 CREATE TYPE payroll_status     AS ENUM ('draft', 'processing', 'processed', 'paid');
 CREATE TYPE employee_type      AS ENUM ('Regular', 'Probationary', 'Contractual', 'Part-time');
 CREATE TYPE pay_class          AS ENUM ('Tier 1', 'Tier 2', 'Rank And File', 'Confidentials');
@@ -228,10 +230,17 @@ CREATE TABLE payroll_entries (
   absences        numeric(14,2) NOT NULL DEFAULT 0,
   lwop            numeric(14,2) NOT NULL DEFAULT 0,  -- derived: daily rate × lwop_days
   other_deductions numeric(14,2) NOT NULL DEFAULT 0,
-  -- Timekeeping drivers (counts, not money)
+  -- Timekeeping drivers (counts, not money). Each kind of unpaid time has its
+  -- own driver so a day is never charged on two deduction lines:
+  --   lwop_days   → approved but UNPAID leave
+  --   absent_days → days missed with no approved leave (did not apply)
+  --   tardy_days  → fractions of a day lost to late arrivals (0.0625 = 30 min)
   overtime_hours  numeric(8,2)  NOT NULL DEFAULT 0 CHECK (overtime_hours >= 0),
   night_diff_hours numeric(8,2) NOT NULL DEFAULT 0 CHECK (night_diff_hours >= 0),
-  lwop_days       integer       NOT NULL DEFAULT 0 CHECK (lwop_days >= 0),
+  lwop_days       numeric(8,4)  NOT NULL DEFAULT 0 CHECK (lwop_days >= 0),
+  absent_days     numeric(8,4)  NOT NULL DEFAULT 0 CHECK (absent_days >= 0),
+  tardy_days      numeric(8,4)  NOT NULL DEFAULT 0 CHECK (tardy_days >= 0),
+  undertime_minutes numeric(8,2) NOT NULL DEFAULT 0 CHECK (undertime_minutes >= 0),
   CONSTRAINT uq_payroll_entry UNIQUE (run_id, employee_id)
 );
 
@@ -325,6 +334,44 @@ CREATE UNIQUE INDEX uq_leave_types_name ON leave_types (lower(btrim(name)));
 CREATE UNIQUE INDEX uq_leave_types_code ON leave_types (upper(btrim(code)));
 CREATE INDEX idx_leave_types_status   ON leave_types (status);
 CREATE INDEX idx_leave_types_agencies ON leave_types USING gin (agencies);
+
+-- -----------------------------------------------------------------------------
+-- leave_records  (filed leave applications — see src/lib/leaveRecords.ts)
+-- -----------------------------------------------------------------------------
+-- WHY THIS MATTERS TO PAYROLL: a biometric import sees no punch on a leave day
+-- and would otherwise book it as LWOP, docking pay for approved time off. The
+-- import consults these records so an approved day is 'on-leave' rather than
+-- 'absent', and paid leave is excluded from LWOP entirely. Only 'approved'
+-- records suppress a deduction — filing a request nobody has acted on must not.
+CREATE TABLE leave_records (
+  id               text        PRIMARY KEY,
+  employee_id      text        NOT NULL REFERENCES employees(id)
+                               ON DELETE CASCADE ON UPDATE CASCADE,
+  employee_name    text        NOT NULL DEFAULT '',   -- denormalised for display
+  -- SET NULL, not CASCADE: deleting a leave type must not delete the
+  -- applications filed under it (the snapshot columns keep them readable).
+  leave_type_id    text        REFERENCES leave_types(id)
+                               ON DELETE SET NULL ON UPDATE CASCADE,
+  -- Snapshots taken at filing time, deliberately not joined: a record is a
+  -- historical fact, so re-pricing a type must not re-price leave already taken.
+  leave_type_name  text        NOT NULL DEFAULT '',
+  leave_type_code  text        NOT NULL DEFAULT '',
+  pay_rule         text        NOT NULL DEFAULT 'paid' CHECK (pay_rule IN ('paid','unpaid')),
+  start_date       date        NOT NULL,
+  end_date         date        NOT NULL,
+  reason           text        NOT NULL DEFAULT '',
+  status           text        NOT NULL DEFAULT 'pending'
+                               CHECK (status IN ('pending','approved','rejected','cancelled')),
+  decided_by       text,                              -- NULL while pending
+  decided_at       timestamptz,
+  created_at       timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT chk_leave_records_range CHECK (end_date >= start_date)
+);
+
+-- The attendance import walks a date range per employee; this serves that scan.
+CREATE INDEX idx_leave_records_employee_dates
+  ON leave_records (employee_id, start_date, end_date);
+CREATE INDEX idx_leave_records_status ON leave_records (status);
 
 -- -----------------------------------------------------------------------------
 -- reports  (saved report metadata)

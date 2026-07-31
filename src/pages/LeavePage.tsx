@@ -16,11 +16,13 @@ import {
 
 import { PageHeader } from "@/components/layout/PageHeader";
 import { LeaveTypeDialog } from "@/components/leave/LeaveTypeDialog";
+import { LeaveRecordDialog } from "@/components/leave/LeaveRecordDialog";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Select } from "@/components/ui/select";
 import { StatusChip } from "@/components/ui/status-chip";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -45,6 +47,12 @@ import {
   canManageLeave,
   type LeaveType,
 } from "@/lib/leave";
+import {
+  LEAVE_STATUS_LABEL,
+  LEAVE_STATUS_TINT,
+  workingDaysInRecord,
+  type LeaveRecord,
+} from "@/lib/leaveRecords";
 
 /** "All agencies" in the page filter — distinct from the ALL_AGENCIES sentinel
  *  stored on a type, which means "this type applies everywhere". */
@@ -59,6 +67,10 @@ export function LeavePage() {
     addLeaveTypes,
     updateLeaveType,
     removeLeaveType,
+    leaveRecords,
+    fileLeave,
+    decideLeave,
+    removeLeaveRecord,
   } = useStore();
   const { user, isAdmin } = useAuth();
   const { toast } = useToast();
@@ -71,6 +83,9 @@ export function LeavePage() {
   const [formOpen, setFormOpen] = React.useState(false);
   const [editing, setEditing] = React.useState<LeaveType | null>(null);
   const [deleting, setDeleting] = React.useState<LeaveType | null>(null);
+  const [fileOpen, setFileOpen] = React.useState(false);
+  const [deletingRecord, setDeletingRecord] = React.useState<LeaveRecord | null>(null);
+  const [recordQuery, setRecordQuery] = React.useState("");
 
   const employeeAgencies = React.useMemo(
     () => employees.map((e) => e.agency),
@@ -114,6 +129,27 @@ export function LeavePage() {
       scoped: leaveTypes.filter((t) => !appliesToAllAgencies(t)).length,
     };
   }, [leaveTypes]);
+
+  /** Filed applications matching the search, newest first. */
+  const visibleRecords = React.useMemo(() => {
+    const q = recordQuery.trim().toLowerCase();
+    return leaveRecords
+      .filter(
+        (r) =>
+          !q ||
+          r.employeeName.toLowerCase().includes(q) ||
+          r.leaveTypeCode.toLowerCase().includes(q) ||
+          r.leaveTypeName.toLowerCase().includes(q) ||
+          r.reason.toLowerCase().includes(q),
+      )
+      .sort((a, b) => b.startDate.localeCompare(a.startDate));
+  }, [leaveRecords, recordQuery]);
+
+  /** Applications still awaiting a decision — the queue that needs attention. */
+  const pendingCount = React.useMemo(
+    () => leaveRecords.filter((r) => r.status === "pending").length,
+    [leaveRecords],
+  );
 
   const openCreate = () => {
     setEditing(null);
@@ -160,12 +196,17 @@ export function LeavePage() {
     <>
       <PageHeader
         title="Leave"
-        description="Define the leave types your workspace recognises and which agencies each applies to."
+        description="Define the leave types your workspace recognises, and file the applications that stop payroll deducting approved time off."
         actions={
           canManage ? (
-            <Button size="lg" onClick={openCreate}>
-              <Plus className="h-4 w-4" /> New leave type
-            </Button>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button size="lg" variant="outline" onClick={() => setFileOpen(true)}>
+                <ClipboardCheck className="h-4 w-4" /> File leave
+              </Button>
+              <Button size="lg" onClick={openCreate}>
+                <Plus className="h-4 w-4" /> New leave type
+              </Button>
+            </div>
           ) : (
             <span className="inline-flex items-center gap-2 rounded-xl border border-border bg-secondary/50 px-3.5 py-2 text-xs text-muted-foreground">
               <Lock className="h-3.5 w-3.5" />
@@ -183,6 +224,208 @@ export function LeavePage() {
         <StatCard icon={Building2} label="Agency-specific" value={stats.scoped} />
       </div>
 
+      <Tabs defaultValue="records" className="space-y-5">
+        <TabsList>
+          <TabsTrigger value="records">
+            Filed leave
+            {pendingCount > 0 && (
+              <span className="ml-2 rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[0.65rem] font-semibold text-amber-600 dark:text-amber-400">
+                {pendingCount}
+              </span>
+            )}
+          </TabsTrigger>
+          <TabsTrigger value="types">Leave types</TabsTrigger>
+        </TabsList>
+
+        {/* ---- Filed applications ---- */}
+        <TabsContent value="records" className="space-y-5">
+          <div className="relative sm:max-w-sm">
+            <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+            <input
+              value={recordQuery}
+              onChange={(e) => setRecordQuery(e.target.value)}
+              placeholder="Search by employee, type or reason…"
+              aria-label="Search filed leave"
+              className="h-12 w-full rounded-xl border border-input bg-card pl-10 pr-3.5 text-[0.95rem] text-foreground shadow-soft outline-none transition-all focus:border-primary focus:shadow-focus"
+            />
+          </div>
+
+          {leaveRecords.length === 0 ? (
+            <EmptyRecords canManage={canManage} onFile={() => setFileOpen(true)} />
+          ) : visibleRecords.length === 0 ? (
+            <Card>
+              <CardContent className="p-12 text-center">
+                <p className="text-sm text-muted-foreground">
+                  No filed leave matches your search.
+                </p>
+              </CardContent>
+            </Card>
+          ) : (
+            <Card className="overflow-hidden">
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-border bg-secondary/40 text-left">
+                      <Th>Employee</Th>
+                      <Th>Type</Th>
+                      <Th>Dates</Th>
+                      <Th className="text-right">Working days</Th>
+                      <Th>Pay</Th>
+                      <Th>Payroll effect</Th>
+                      <Th>Status</Th>
+                      {canManage && <Th className="w-12 text-right sr-only">Actions</Th>}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {visibleRecords.map((r) => {
+                      const days = workingDaysInRecord(r);
+                      // Only approved leave changes what payroll does. Approved
+                      // paid leave suppresses the deduction; approved unpaid
+                      // leave deducts as LWOP; anything undecided is inert.
+                      const deducts = r.status === "approved" && r.payRule === "unpaid";
+                      const shielded = r.status === "approved" && r.payRule === "paid";
+                      return (
+                        <tr
+                          key={r.id}
+                          className="border-b border-border transition-colors last:border-0 hover:bg-secondary/30"
+                        >
+                          <td className="px-4 py-3.5">
+                            <p className="font-medium text-foreground">{r.employeeName}</p>
+                            {r.reason && (
+                              <p className="max-w-[16rem] truncate text-xs text-muted-foreground">
+                                {r.reason}
+                              </p>
+                            )}
+                          </td>
+                          <td className="px-4 py-3.5">
+                            <span className="inline-flex items-center gap-2">
+                              <span className="rounded-lg bg-primary/10 px-1.5 py-0.5 text-[0.7rem] font-bold text-primary">
+                                {r.leaveTypeCode}
+                              </span>
+                              <span className="text-xs text-muted-foreground">
+                                {r.leaveTypeName}
+                              </span>
+                            </span>
+                          </td>
+                          <td className="whitespace-nowrap px-4 py-3.5 tabular-nums text-foreground">
+                            {r.startDate}
+                            {r.endDate !== r.startDate && ` → ${r.endDate}`}
+                          </td>
+                          <td className="px-4 py-3.5 text-right tabular-nums text-foreground">
+                            {days}
+                          </td>
+                          <td className="px-4 py-3.5">
+                            <span
+                              className={cn(
+                                "inline-flex rounded-full px-2.5 py-1 text-xs font-medium",
+                                PAY_RULE_TINT[r.payRule],
+                              )}
+                            >
+                              {PAY_RULE_LABEL[r.payRule]}
+                            </span>
+                          </td>
+                          <td className="px-4 py-3.5 text-xs">
+                            {shielded ? (
+                              <span className="text-emerald-600 dark:text-emerald-400">
+                                Not deducted
+                              </span>
+                            ) : deducts ? (
+                              <span className="text-amber-600 dark:text-amber-400">
+                                Deducts {days} day{days === 1 ? "" : "s"} LWOP
+                              </span>
+                            ) : (
+                              <span className="text-muted-foreground">
+                                No effect until approved
+                              </span>
+                            )}
+                          </td>
+                          <td className="px-4 py-3.5">
+                            <span
+                              className={cn(
+                                "inline-flex rounded-full px-2.5 py-1 text-xs font-medium",
+                                LEAVE_STATUS_TINT[r.status],
+                              )}
+                              title={
+                                r.decidedBy
+                                  ? `${LEAVE_STATUS_LABEL[r.status]} by ${r.decidedBy}`
+                                  : undefined
+                              }
+                            >
+                              {LEAVE_STATUS_LABEL[r.status]}
+                            </span>
+                          </td>
+                          {canManage && (
+                            <td className="px-4 py-3.5 text-right">
+                              <DropdownMenu>
+                                <DropdownMenuTrigger asChild>
+                                  <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    className="h-8 w-8"
+                                    aria-label={`Actions for ${r.employeeName}'s ${r.leaveTypeCode} leave`}
+                                  >
+                                    <MoreHorizontal className="h-4 w-4" />
+                                  </Button>
+                                </DropdownMenuTrigger>
+                                <DropdownMenuContent align="end">
+                                  <DropdownMenuItem
+                                    disabled={r.status === "approved"}
+                                    onSelect={() => {
+                                      decideLeave(r.id, "approved");
+                                      toast({
+                                        variant: "success",
+                                        title: "Leave approved",
+                                        description:
+                                          r.payRule === "paid"
+                                            ? `${days} day(s) will not be deducted from ${r.employeeName}'s pay.`
+                                            : `${days} unpaid day(s) will be deducted as LWOP.`,
+                                      });
+                                    }}
+                                  >
+                                    <ClipboardCheck /> Approve
+                                  </DropdownMenuItem>
+                                  <DropdownMenuItem
+                                    disabled={r.status === "rejected"}
+                                    onSelect={() => {
+                                      decideLeave(r.id, "rejected");
+                                      toast({
+                                        variant: "info",
+                                        title: "Leave rejected",
+                                        description: `${r.employeeName}'s ${r.leaveTypeCode} leave was rejected — the days stay deductible.`,
+                                      });
+                                    }}
+                                  >
+                                    <Lock /> Reject
+                                  </DropdownMenuItem>
+                                  <DropdownMenuItem
+                                    disabled={r.status === "cancelled"}
+                                    onSelect={() => decideLeave(r.id, "cancelled")}
+                                  >
+                                    <RefreshCw /> Cancel
+                                  </DropdownMenuItem>
+                                  <DropdownMenuSeparator />
+                                  <DropdownMenuItem
+                                    destructive
+                                    onSelect={() => setDeletingRecord(r)}
+                                  >
+                                    <Trash2 /> Delete
+                                  </DropdownMenuItem>
+                                </DropdownMenuContent>
+                              </DropdownMenu>
+                            </td>
+                          )}
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </Card>
+          )}
+        </TabsContent>
+
+        {/* ---- Leave-type catalogue ---- */}
+        <TabsContent value="types" className="space-y-5">
       {/* ---- Filters ---- */}
       <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center">
         <div className="relative flex-1">
@@ -348,6 +591,57 @@ export function LeavePage() {
           </div>
         </Card>
       )}
+        </TabsContent>
+      </Tabs>
+
+      <LeaveRecordDialog
+        open={fileOpen}
+        onOpenChange={setFileOpen}
+        employees={employees}
+        leaveTypes={leaveTypes}
+        existing={leaveRecords}
+        onSubmit={(draft) => {
+          const created = fileLeave(draft);
+          if (!created) {
+            toast({
+              variant: "error",
+              title: "Couldn't file leave",
+              description: "That leave type no longer exists.",
+            });
+            return;
+          }
+          toast({
+            variant: "success",
+            title: "Leave filed",
+            description:
+              created.status === "approved"
+                ? `${created.leaveTypeCode} leave for ${created.employeeName} is approved — payroll will honour it.`
+                : `${created.leaveTypeCode} leave for ${created.employeeName} is awaiting approval.`,
+          });
+        }}
+      />
+
+      <ConfirmDialog
+        open={Boolean(deletingRecord)}
+        onOpenChange={(o) => !o && setDeletingRecord(null)}
+        title="Delete leave record?"
+        description={
+          deletingRecord
+            ? `${deletingRecord.employeeName}'s ${deletingRecord.leaveTypeCode} leave (${deletingRecord.startDate} to ${deletingRecord.endDate}) will be removed. If it was approved, those days become deductible again on the next attendance import.`
+            : undefined
+        }
+        confirmLabel="Delete"
+        destructive
+        onConfirm={() => {
+          if (!deletingRecord) return;
+          removeLeaveRecord(deletingRecord.id);
+          toast({
+            variant: "success",
+            title: "Leave record deleted",
+            description: `${deletingRecord.employeeName}'s ${deletingRecord.leaveTypeCode} leave was removed.`,
+          });
+        }}
+      />
 
       <LeaveTypeDialog
         open={formOpen}
@@ -426,6 +720,43 @@ function StatCard({
           <p className="truncate text-xs text-muted-foreground">{label}</p>
           <p className="text-xl font-semibold tabular-nums text-foreground">{value}</p>
         </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+/**
+ * First-run state for the filed-leave tab. Worth spelling out the payroll
+ * consequence here: with no records on file, every punch-less day an attendance
+ * import sees is charged as an absence — which is correct, but only if nobody is
+ * actually on approved leave.
+ */
+function EmptyRecords({
+  canManage,
+  onFile,
+}: {
+  canManage: boolean;
+  onFile: () => void;
+}) {
+  return (
+    <Card>
+      <CardContent className="flex flex-col items-center gap-4 p-12 text-center">
+        <span className="flex h-14 w-14 items-center justify-center rounded-2xl bg-primary/10 text-primary">
+          <ClipboardCheck className="h-7 w-7" />
+        </span>
+        <div className="space-y-1">
+          <h2 className="text-lg font-semibold text-foreground">No leave filed yet</h2>
+          <p className="max-w-md text-sm text-muted-foreground">
+            File an application so an attendance import treats those days as leave
+            instead of deducting them. Until leave is filed and approved, every
+            working day without a punch is charged as an absence.
+          </p>
+        </div>
+        {canManage && (
+          <Button className="mt-1" onClick={onFile}>
+            <Plus className="h-4 w-4" /> File leave
+          </Button>
+        )}
       </CardContent>
     </Card>
   );

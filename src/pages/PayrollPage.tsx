@@ -25,7 +25,6 @@ import { formatCurrency, formatDate } from "@/lib/format";
 import {
   deptRegister,
   registerTotals,
-  splitIntoHalves,
   PAYROLL_REGISTER_FIELDS,
   ALL_AGENCIES as REPORT_ALL_AGENCIES,
   ALL_PAY_CLASSES,
@@ -71,8 +70,10 @@ export function PayrollPage() {
     employees,
     agencies,
     payrollOverrides,
-    lwopDaysByEmployee,
+    timekeepingByEmployee,
     contributionRates,
+    loans,
+    employeeLoanEntries,
     runPayroll,
     markPayrollPaid,
     disapprovePayrollRun,
@@ -142,8 +143,8 @@ export function PayrollPage() {
   // selected agency. The report's ALL_AGENCIES sentinel matches this page's.
   // Every pay class is included: the run pays the whole scope, so previewing a
   // single class would understate what is about to be disbursed.
-  // Paytype is "Full month" so the register shows the whole-month figures; the
-  // review then presents them split into 1st-/2nd-half cutoffs below.
+  // Paytype is "Full month" so the register shows the whole-month figures —
+  // the review presents the run as a single whole-month total, not by cutoff.
   const reviewFilters = React.useMemo<ReportFilters>(
     () => ({
       // The period under review is the one being run, not a fixed month.
@@ -157,25 +158,24 @@ export function PayrollPage() {
   );
 
   const reviewRows = React.useMemo(
-    () => deptRegister(employees, reviewFilters, payrollOverrides, lwopDaysByEmployee),
+    () => deptRegister(employees, reviewFilters, payrollOverrides, timekeepingByEmployee),
     // contributionRates: the review's deduction lines come from the configured
     // statutory brackets, so a rate edit must refresh the pre-run figures.
-    [employees, reviewFilters, payrollOverrides, lwopDaysByEmployee, contributionRates],
+    // loans/employeeLoanEntries: the engine reads the resolved loan deductions
+    // from module state (see setDeductionInputs), so a ledger change is not
+    // visible in these figures unless it also invalidates this memo.
+    [
+      employees,
+      reviewFilters,
+      payrollOverrides,
+      timekeepingByEmployee,
+      contributionRates,
+      loans,
+      employeeLoanEntries,
+    ],
   );
 
   const reviewTotals = React.useMemo(() => registerTotals(reviewRows), [reviewRows]);
-
-  // The whole-month gross/net split evenly across the two semi-monthly cutoffs
-  // (1st half = days 1–15, 2nd half = 16–end). Each half pays ½; together they
-  // reconcile back to the whole-month figure shown in the register above.
-  const halfBreakdown = React.useMemo(
-    () => ({
-      gross: splitIntoHalves(reviewTotals.gross_earnings ?? 0),
-      dedn: splitIntoHalves(reviewTotals.total_dedn ?? 0),
-      net: splitIntoHalves(reviewTotals.total_net ?? 0),
-    }),
-    [reviewTotals],
-  );
 
   // Auto-detected payroll period from today's date, e.g. "July 2026". This is
   // the period the run defaults to — no manual month picking needed.
@@ -493,55 +493,6 @@ export function PayrollPage() {
               </tfoot>
             </table>
           </div>
-
-          {/* Whole-month total split into the two semi-monthly cutoffs. The
-              register above shows the full month; each half pays ½ and the two
-              halves reconcile back to it. */}
-          {reviewRows.length > 0 && (
-            <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
-              {(
-                [
-                  { key: "first" as const, label: "1st half", sub: "Days 1 – 15" },
-                  { key: "second" as const, label: "2nd half", sub: "Days 16 – end" },
-                ]
-              ).map((half) => (
-                <div
-                  key={half.key}
-                  className="rounded-xl border border-border bg-muted/30 p-4"
-                >
-                  <div className="mb-2 flex items-center gap-2">
-                    <CalendarClock className="h-4 w-4 text-primary" />
-                    <p className="text-sm font-semibold text-foreground">{half.label}</p>
-                    <span className="text-xs text-muted-foreground">{half.sub}</span>
-                  </div>
-                  <div className="space-y-1.5">
-                    {(
-                      [
-                        ["Gross", halfBreakdown.gross[half.key]],
-                        ["Deductions", halfBreakdown.dedn[half.key]],
-                        ["Net", halfBreakdown.net[half.key]],
-                      ] as const
-                    ).map(([label, value]) => (
-                      <div
-                        key={label}
-                        className="flex items-center justify-between text-sm last:border-0"
-                      >
-                        <span className="text-muted-foreground">{label}</span>
-                        <span
-                          className={cn(
-                            "font-medium tabular-nums",
-                            label === "Net" ? "font-semibold text-foreground" : "text-foreground",
-                          )}
-                        >
-                          {formatCurrency(value)}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
 
           <DialogFooter>
             <Button variant="outline" onClick={() => setReviewOpen(false)}>

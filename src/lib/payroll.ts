@@ -12,7 +12,19 @@
  * invented a second time.
  */
 import type { Employee, EmployeeType } from "@/store/types";
-import { findMatchingRate, type ContributionRate } from "@/lib/contributions";
+import {
+  defaultEarningsMatrix,
+  findMatchingRate,
+  type ContributionRate,
+  type ContributionType,
+  type EarningCode,
+  type EarningsMatrix,
+} from "@/lib/contributions";
+import {
+  noDeductions,
+  type EmployeeDeductions,
+  type PayrollDeductionInputs,
+} from "@/lib/payrollInputs";
 
 export type { EmployeeType };
 
@@ -42,8 +54,52 @@ export interface PayrollComponents {
   // Timekeeping drivers — counts (not money) that auto-calc the fields above.
   overtimeHours: number;
   nightDiffHours: number;
+  /**
+   * Days of approved **unpaid** leave. Drives `lwop`.
+   *
+   * Unexcused absences and lateness are *not* counted here — they have their own
+   * drivers below, each charging its own deduction line. See the note on
+   * {@link TimekeepingInput} for why the three are kept apart.
+   */
   lwopDays: number;
+  /**
+   * Whole days absent with no approved leave covering them. Drives `absences`.
+   * This is the "absent and did not file leave" charge.
+   */
+  absentDays: number;
+  /**
+   * Working days lost to arriving after the shift start, as a fraction of a day
+   * (0.0625 = half an hour late). Drives `late`. See lib/tardiness.ts.
+   */
+  tardyDays: number;
+  /** Minutes of undertime (leaving early). Drives `undertime`. Hand-entered. */
+  undertimeMinutes: number;
 }
+
+/**
+ * One employee's timekeeping for the period, as resolved by the biometric
+ * attendance import against their filed leave.
+ *
+ * WHY THE THREE DAY-COUNTS ARE SEPARATE: they are all unpaid, so a single total
+ * would deduct the right amount — but the payslip could not say *why*. Splitting
+ * them lets each charge land on the register line that already exists for it
+ * (LWOP 401 / absences / late), and it removes a real double-deduction: the
+ * engine previously charged a seeded `late` and `absences` on top of an imported
+ * LWOP total that already included those same days.
+ */
+export interface TimekeepingInput {
+  /** Whole days with no punch and no approved leave — unexcused absence. */
+  absentDays: number;
+  /** Whole days of approved but unpaid leave. */
+  unpaidLeaveDays: number;
+  /** Days lost to late arrivals, summed as fractions of a day. */
+  tardyDays: number;
+  /** Minutes of undertime. The device log has no early-out rule yet, so 0. */
+  undertimeMinutes?: number;
+}
+
+/** Timekeeping per employee id, from the latest attendance import. */
+export type TimekeepingByEmployee = Record<string, TimekeepingInput>;
 
 export interface PayrollRow extends PayrollComponents {
   id: string;
@@ -88,16 +144,28 @@ export const DEDUCTION_KEYS = DEDUCTION_FIELDS.map((f) => f.key);
 
 /**
  * Fields whose amount is computed from a driver and is therefore read-only in
- * the grid: overtime/nightDiff (from hours), govDeductions (from basic) and
- * lwop (from days). Editing the driver recomputes them — see recalcDerived.
+ * the grid: overtime/nightDiff (from hours), govDeductions (from earnings), and
+ * lwop/absences/late/undertime (from their day and minute counts). Editing the
+ * driver recomputes them — see recalcDerived.
  */
-export const DERIVED_KEYS: PayrollFieldKey[] = ["overtime", "nightDiff", "govDeductions", "lwop"];
+export const DERIVED_KEYS: PayrollFieldKey[] = [
+  "overtime",
+  "nightDiff",
+  "govDeductions",
+  "lwop",
+  "absences",
+  "late",
+  "undertime",
+];
 
 /** Timekeeping driver inputs the grid edits to auto-calc the derived amounts. */
 export const DRIVER_FIELDS: { key: PayrollFieldKey; label: string; unit: string; drives: PayrollFieldKey }[] = [
   { key: "overtimeHours", label: "OT Hours", unit: "h", drives: "overtime" },
   { key: "nightDiffHours", label: "Night Diff Hours", unit: "h", drives: "nightDiff" },
   { key: "lwopDays", label: "LWOP Days", unit: "d", drives: "lwop" },
+  { key: "absentDays", label: "Absent Days", unit: "d", drives: "absences" },
+  { key: "tardyDays", label: "Tardy Days", unit: "d", drives: "late" },
+  { key: "undertimeMinutes", label: "Undertime Mins", unit: "m", drives: "undertime" },
 ];
 
 export const DRIVER_KEYS = DRIVER_FIELDS.map((f) => f.key);
@@ -205,17 +273,60 @@ export const lwopDeduction = (basic: number, days: number) =>
   Math.round(dailyRateFromMonthly(basic) * days);
 
 /**
+ * Absence deduction = daily rate × days absent without approved leave.
+ *
+ * Charged at the same daily rate as LWOP because it is the same lost day; it
+ * sits on its own line so a payslip distinguishes "did not report and did not
+ * file" from leave that was filed as unpaid.
+ */
+export const absenceDeduction = (basic: number, days: number) =>
+  Math.round(dailyRateFromMonthly(basic) * days);
+
+/**
+ * Tardiness deduction = daily rate × the day-fractions lost to late arrivals.
+ *
+ * Pro-rata against the 8-hour day, so being 30 minutes late costs 30 minutes of
+ * pay — see lib/tardiness.ts for the rule and why it isn't a flat penalty.
+ */
+export const lateDeduction = (basic: number, tardyDays: number) =>
+  Math.round(dailyRateFromMonthly(basic) * tardyDays);
+
+/** Undertime deduction = hourly rate × minutes ÷ 60 (whole PHP). */
+export const undertimeDeduction = (basic: number, minutes: number) =>
+  Math.round((hourlyRate(basic) / 60) * minutes);
+
+/**
+ * The identity fields needed to itemise a row's ancillary lines, and therefore
+ * to build the per-contribution base. Every real payroll row carries them.
+ */
+export interface RowIdentity {
+  employeeId: string;
+  employeeType: EmployeeType;
+}
+
+/**
  * Recompute every derived amount (overtime, night diff, government deductions,
  * LWOP) from its driver on the row. Called after any edit so the grid's
  * auto-calculated fields — and therefore gross/deductions/net — stay in sync.
+ *
+ * Government deductions are re-derived from the row's *earnings*, not just its
+ * basic pay: the Contribution Matrix decides which earning lines belong in each
+ * contribution's base, so editing an allowance can legitimately move an
+ * employee into a different SSS/PhilHealth/HDMF bracket.
  */
-export function recalcDerived<T extends PayrollComponents>(row: T): T {
+export function recalcDerived<T extends PayrollComponents & RowIdentity>(row: T): T {
   return {
     ...row,
     overtime: overtimePay(row.basic, row.overtimeHours),
     nightDiff: nightDiffPay(row.basic, row.nightDiffHours),
-    govDeductions: statutoryDeductions(row.basic),
+    govDeductions: statutoryDeductions(row.basic, earningAmountsFor(row)),
+    // Each unpaid-time line is charged from its own count, so the three never
+    // overlap: LWOP covers filed-but-unpaid leave, absences covers days missed
+    // without filing, late covers the pro-rated tardiness.
     lwop: lwopDeduction(row.basic, row.lwopDays),
+    absences: absenceDeduction(row.basic, row.absentDays),
+    late: lateDeduction(row.basic, row.tardyDays),
+    undertime: undertimeDeduction(row.basic, row.undertimeMinutes),
   };
 }
 
@@ -243,17 +354,32 @@ export interface AncillaryLines {
   pecewaLoan: number;
   coopLoan: number;
   pagibigAd: number;
+  /** Company/bank loans and the fixed 2- and 5-year plans — no register column
+   *  of their own, so they surface on OTHER DEDN. Still fully deducted. */
+  otherLoans: number;
   hmo: number;
   dedA: number;
   electricBill: number;
   memIns: number;
 }
 
-/** Derive the itemised register lines for one employee (stable per employee). */
+/**
+ * Derive the itemised register lines for one employee.
+ *
+ * The loan and HMO lines come from `deductions` — the employee's real Loans-page
+ * and tabbed-ledger records, resolved by lib/payrollInputs. An employee with no
+ * loan records is deducted nothing on those lines; there is deliberately no
+ * synthesised fallback, so what payroll takes is only ever what HR entered.
+ *
+ * The allowance lines remain policy-driven (COLA, rice and the per-type
+ * transport allowance are the same for everyone in a class), and the acting
+ * allowance stays seeded pending a real assignments ledger.
+ */
 export function ancillaryLines(
   employeeId: string,
   employeeType: EmployeeType,
   basic: number,
+  deductions: EmployeeDeductions = noDeductions(),
 ): AncillaryLines {
   const seed = employeeSeed(employeeId);
   const s = (n: number, mod: number) => seeded(seed + n, mod);
@@ -262,28 +388,54 @@ export function ancillaryLines(
     riceSubsidy: RICE_SUBSIDY_MONTHLY,
     transportAllowance: TRANSPORT_ALLOWANCE_BY_TYPE[employeeType],
     actingAllowance: s(51, 8) === 0 ? Math.round(basic * 0.05) : 0,
-    sssLoan: s(21, 8) === 0 ? 850 : 0,
-    hdmfLoan: s(22, 10) === 0 ? 600 : 0,
-    pecewaLoan: s(52, 9) === 0 ? 500 : 0,
-    coopLoan: s(23, 6) === 0 ? 1200 : 0,
-    pagibigAd: s(53, 7) === 0 ? 300 : 0,
-    hmo: HMO_BY_TYPE[employeeType],
-    dedA: s(54, 10) === 0 ? 250 : 0,
-    electricBill: s(55, 6) === 0 ? 450 : 0,
+    sssLoan: deductions.sssLoan,
+    hdmfLoan: deductions.hdmfLoan,
+    pecewaLoan: deductions.pecewaLoan,
+    coopLoan: deductions.coopLoan,
+    pagibigAd: deductions.pagibigAd,
+    otherLoans: deductions.otherLoans,
+    // A ledger HMO line overrides the per-type default premium: an employee with
+    // an actual policy on file is deducted that policy, not the class average.
+    hmo: deductions.hmo || HMO_BY_TYPE[employeeType],
+    dedA: deductions.dedA,
+    electricBill: deductions.electricBill,
     memIns: MEMBERSHIP_INSURANCE_MONTHLY,
   };
 }
 
+/**
+ * The loan/HMO ledger inputs currently in force, keyed by employee id. Set from
+ * the store (like the contribution rates) so the many pure functions that
+ * itemise a row — payslip, register, NET 15/30 — resolve the same deductions
+ * without threading the ledgers through every signature.
+ */
+let activeDeductionInputs: PayrollDeductionInputs = {};
+
+/** Point the payroll engine at the resolved per-employee loan/HMO deductions. */
+export function setDeductionInputs(inputs: PayrollDeductionInputs): void {
+  activeDeductionInputs = inputs;
+}
+
+/** The deduction inputs currently driving the loan and HMO lines. */
+export function getDeductionInputs(): PayrollDeductionInputs {
+  return activeDeductionInputs;
+}
+
+/** One employee's resolved deductions, or an all-zero set when they have none. */
+export function deductionsFor(employeeId: string): EmployeeDeductions {
+  return activeDeductionInputs[employeeId] ?? noDeductions();
+}
+
 /** The ancillary lines for an already-built row. */
 export function ancillaryFor(row: PayrollRow): AncillaryLines {
-  return ancillaryLines(row.employeeId, row.employeeType, row.basic);
+  return ancillaryLines(row.employeeId, row.employeeType, row.basic, deductionsFor(row.employeeId));
 }
 
 export const totalAllowances = (a: AncillaryLines) =>
   a.transportAllowance + a.cola + a.riceSubsidy;
 
 export const totalLoans = (a: AncillaryLines) =>
-  a.sssLoan + a.hdmfLoan + a.pecewaLoan + a.coopLoan + a.pagibigAd;
+  a.sssLoan + a.hdmfLoan + a.pecewaLoan + a.coopLoan + a.pagibigAd + a.otherLoans;
 
 export const totalOtherDeductions = (a: AncillaryLines) =>
   a.hmo + a.dedA + a.electricBill + a.memIns;
@@ -320,6 +472,18 @@ export interface StatutoryBreakdown {
   philHealth: number;
   pagIbig: number;
   tax: number;
+  /**
+   * The contributable base each line was actually computed against, after the
+   * Contribution Matrix decided which earnings count. Surfaced so a payslip can
+   * explain *why* a bracket was picked rather than just showing the peso.
+   */
+  base: Record<"SSS" | "PhilHealth" | "Pag-IBIG" | "Tax", number>;
+  /**
+   * Types with no active bracket covering their base, which therefore fell back
+   * to the built-in statutory formula. Empty when the configured table covered
+   * every line — which is what finance wants a payroll run to report.
+   */
+  unmatched: ContributionType[];
 }
 
 /**
@@ -331,6 +495,14 @@ export interface StatutoryBreakdown {
  * formulas are used as a fallback — see `statutoryBreakdown`.
  */
 let activeRates: ContributionRate[] = [];
+
+/**
+ * The Contribution Matrix currently in force: which earning lines are added to
+ * basic pay to form each contribution's base. Defaults to the statutory
+ * convention (see `defaultEarningsMatrix`) so payroll behaves sensibly before
+ * the store has loaded, and is replaced by the configured matrix on load.
+ */
+let activeMatrix: EarningsMatrix = defaultEarningsMatrix();
 
 /**
  * Point the payroll engine at the configured contribution rates. Called by the
@@ -347,15 +519,90 @@ export function getContributionRates(): ContributionRate[] {
 }
 
 /**
- * The employee share for one contribution type at `basic`, taken from the
- * configured rate table. Returns null when no active bracket covers the salary
+ * Point the engine at the configured Contribution Matrix, so that toggling (say)
+ * overtime into the SSS base under Contributions changes what payroll deducts.
+ */
+export function setEarningsMatrix(matrix: EarningsMatrix): void {
+  activeMatrix = matrix;
+}
+
+/** The Contribution Matrix currently driving each contribution's base. */
+export function getEarningsMatrix(): EarningsMatrix {
+  return activeMatrix;
+}
+
+/**
+ * Map a payroll row's earnings onto the {@link EarningCode}s the Contribution
+ * Matrix is configured in terms of, so the matrix can select a base.
+ *
+ * `basic` is deliberately absent: basic pay is always in every contribution's
+ * base (it is the compensation being contributed against, not an optional
+ * add-on), so it is added unconditionally in {@link contributableBase} and is
+ * not a matrix toggle. Codes the payroll row has no line for — 13th/14th month,
+ * rest-day premiums — are omitted rather than zeroed, so adding them later is a
+ * matter of extending this map.
+ */
+export function earningAmountsFor(
+  row: PayrollComponents & RowIdentity,
+): Partial<Record<EarningCode, number>> {
+  const a = ancillaryLines(
+    row.employeeId,
+    row.employeeType,
+    row.basic,
+    deductionsFor(row.employeeId),
+  );
+  // Allowances and adjustments are roll-ups on the row; carve them back into
+  // their component lines so the matrix can include them individually. Using
+  // `carve` (not the raw ancillary figures) keeps a hand-edited roll-up honest.
+  const allw = carve(row.allowances, [a.transportAllowance, a.cola, a.riceSubsidy]);
+  const [transAllw, cola, rice] = allw.parts;
+  const adj = carve(row.adjustments, [a.actingAllowance]);
+  const [actingAllw] = adj.parts;
+
+  return {
+    cola,
+    transAllw,
+    rice,
+    holidayPay: row.holidayPay,
+    niteDiff: row.nightDiff,
+    ot125: row.overtime,
+    actingAllw,
+    // Surplus from either carved roll-up is an amount the user added on top, so
+    // it belongs with the other miscellaneous earnings.
+    adjustment: adj.remainder,
+    otherEarnings: row.otherEarnings + row.bonuses + row.commissions + allw.remainder,
+  };
+}
+
+/**
+ * The compensation one contribution is computed against: basic pay plus every
+ * earning the Contribution Matrix includes in that type's base.
+ *
+ * Rounded to whole pesos because the bracket lookup is an inclusive range
+ * comparison — a base of ₱19,999.6 must not fall through a band that ends at
+ * ₱19,999.
+ */
+export function contributableBase(
+  type: ContributionType,
+  basic: number,
+  earnings: Partial<Record<EarningCode, number>> = {},
+): number {
+  const included = activeMatrix[type] ?? [];
+  let base = basic;
+  for (const code of included) base += earnings[code] ?? 0;
+  return Math.round(base);
+}
+
+/**
+ * The employee share for one contribution type at `base`, taken from the
+ * configured rate table. Returns null when no active bracket covers the base
  * (or the table is empty), letting the caller fall back to the built-in formula.
  */
 function configuredEmployeeShare(
   type: "SSS" | "PhilHealth" | "Pag-IBIG" | "Tax",
-  basic: number,
+  base: number,
 ): number | null {
-  const rate = findMatchingRate(activeRates, type, basic);
+  const rate = findMatchingRate(activeRates, type, base);
   return rate ? rate.employeeShare : null;
 }
 
@@ -383,35 +630,67 @@ export function sssMonthlySalaryCredit(basic: number): number {
  * Consumers that only need the combined figure use `statutoryDeductions`;
  * reports that itemise each line use this directly.
  */
-export function statutoryBreakdown(basic: number): StatutoryBreakdown {
+export function statutoryBreakdown(
+  basic: number,
+  earnings: Partial<Record<EarningCode, number>> = {},
+): StatutoryBreakdown {
+  const unmatched: ContributionType[] = [];
+  // Each contribution is bracketed against its own base — the Contribution
+  // Matrix may include overtime in one type's base and not another's.
+  const base = {
+    SSS: contributableBase("SSS", basic, earnings),
+    PhilHealth: contributableBase("PhilHealth", basic, earnings),
+    "Pag-IBIG": contributableBase("Pag-IBIG", basic, earnings),
+    Tax: contributableBase("Tax", basic, earnings),
+  } as const;
+
+  /** Configured share for a type, recording a fallback when no bracket matches. */
+  const share = (type: "SSS" | "PhilHealth" | "Pag-IBIG" | "Tax", fallback: number): number => {
+    const configured = configuredEmployeeShare(type, base[type]);
+    if (configured !== null) return configured;
+    unmatched.push(type);
+    return fallback;
+  };
+
   // SSS employee share is 5% of the Monthly Salary Credit (2025 schedule;
   // 15% total, 10% employer / 5% employee) with the MSC capped at ₱35,000.
-  const sss = configuredEmployeeShare("SSS", basic) ?? sssMonthlySalaryCredit(basic) * 0.05;
+  const sss = share("SSS", sssMonthlySalaryCredit(base.SSS) * 0.05);
   // PhilHealth: 5% premium split evenly, so 2.5% employee share, on
   // compensation floored at ₱10,000 and ceilinged at ₱100,000.
-  const philHealth =
-    configuredEmployeeShare("PhilHealth", basic) ??
-    Math.min(Math.max(basic, 10000), 100000) * 0.025;
+  const philHealth = share(
+    "PhilHealth",
+    Math.min(Math.max(base.PhilHealth, 10000), 100000) * 0.025,
+  );
   // Pag-IBIG: 2% employee share on compensation capped at ₱10,000 → ₱200 max.
-  const pagIbig = configuredEmployeeShare("Pag-IBIG", basic) ?? Math.min(basic * 0.02, 200);
+  const pagIbig = share("Pag-IBIG", Math.min(base["Pag-IBIG"] * 0.02, 200));
 
   // Tax is computed on pay net of the three contributions, so it must be
   // derived after them. A configured Tax bracket overrides the TRAIN-law table.
-  const taxable = basic - (sss + philHealth + pagIbig);
-  const tax = configuredEmployeeShare("Tax", basic) ?? withholdingTax(taxable);
+  const taxable = base.Tax - (sss + philHealth + pagIbig);
+  const tax = share("Tax", withholdingTax(taxable));
 
   return {
     sss: Math.round(sss),
     philHealth: Math.round(philHealth),
     pagIbig: Math.round(pagIbig),
     tax: Math.round(tax),
+    base: { ...base },
+    unmatched,
   };
 }
 
 /** Combined statutory deductions, rolled into the government-deductions field. */
-function statutoryDeductions(basic: number): number {
-  const b = statutoryBreakdown(basic);
+function statutoryDeductions(
+  basic: number,
+  earnings: Partial<Record<EarningCode, number>> = {},
+): number {
+  const b = statutoryBreakdown(basic, earnings);
   return b.sss + b.philHealth + b.pagIbig + b.tax;
+}
+
+/** The itemised statutory lines for an already-built payroll row. */
+export function statutoryFor(row: PayrollComponents & RowIdentity): StatutoryBreakdown {
+  return statutoryBreakdown(row.basic, earningAmountsFor(row));
 }
 
 /**
@@ -428,37 +707,54 @@ function withholdingTax(taxable: number): number {
 }
 
 /**
- * Auto-compute every payroll component for an employee. Fixed pay (basic,
- * allowances) comes from HR + type; variable pay (overtime, night diff, late,
- * absences) is derived from per-employee hour counts standing in for
- * timekeeping data; statutory deductions come from the salary. Every value
- * remains editable in the grid afterward.
+ * Auto-compute every payroll component for an employee.
  *
- * Derivations are seeded from the employee id, so a figure only ever changes
- * when that employee's own data changes — never because the roster or a filter
- * reordered the list.
+ * The sources, and what happens when one is missing:
+ *
+ *  - **Fixed pay** (basic, allowances) — HR record + employment type.
+ *  - **Loans, cash advance, HMO, electric bill** — the employee's actual Loans
+ *    and per-employee ledger records, resolved by lib/payrollInputs. No records
+ *    means **no deduction**; nothing is synthesised.
+ *  - **Unpaid time** (LWOP, absences, late) — the `timekeeping` resolved by the
+ *    biometric attendance import against filed leave. No import means the
+ *    employee is treated as having worked the full period, which is the only
+ *    safe default: inventing absences would dock real pay.
+ *  - **Statutory contributions and tax** — the Contributions rate table,
+ *    bracketed on the base the Contribution Matrix defines.
+ *
+ * Overtime and night-differential hours remain seeded stand-ins: the device log
+ * records punches, not approved overtime, so there is no real source for them
+ * yet. They are earnings, so a stand-in cannot under-pay anyone. Every value
+ * remains editable in the grid afterward.
  */
 export function computeComponents(
   employeeId: string,
   basic: number,
   employeeType: EmployeeType,
   department: string,
+  deductions: EmployeeDeductions = noDeductions(),
+  timekeeping?: TimekeepingInput,
 ): PayrollComponents {
   const seed = employeeSeed(employeeId);
   const s = (n: number, mod: number) => seeded(seed + n, mod);
   const rate = hourlyRate(basic);
-  const a = ancillaryLines(employeeId, employeeType, basic);
+  const a = ancillaryLines(employeeId, employeeType, basic, deductions);
 
-  // Timekeeping drivers (seeded stand-ins for real timesheet data).
+  // Overtime/night-diff: seeded stand-ins (earnings, so never under-pay).
   const overtimeHours = s(4, 12); // hours of overtime logged this period
   const nightDiffHours = s(5, 10);
-  const lwopDays = s(24, 7) === 0 ? 1 + s(25, 3) : 0; // 0, or 1–3 unpaid days
-  const lateMinutes = s(13, 45);
-  const undertimeMinutes = s(14, 30);
-  const absentDays = s(15, 3);
 
-  return {
-    // Earnings — computed from rates
+  // Unpaid-time drivers come from the attendance import. Absent it, every count
+  // is zero — an employee with no timekeeping data is not docked.
+  const lwopDays = timekeeping?.unpaidLeaveDays ?? 0;
+  const absentDays = timekeeping?.absentDays ?? 0;
+  const tardyDays = timekeeping?.tardyDays ?? 0;
+  const undertimeMinutes = timekeeping?.undertimeMinutes ?? 0;
+
+  // Earnings first: government deductions are bracketed against a base built
+  // from them (per the Contribution Matrix), so they must exist before the
+  // statutory lines can be derived.
+  const earnings = {
     basic,
     allowances: totalAllowances(a), // transport + COLA + rice subsidy
     overtime: overtimePay(basic, overtimeHours), // derived from overtimeHours
@@ -468,24 +764,50 @@ export function computeComponents(
     bonuses: s(8, 6) === 0 ? Math.round(basic * 0.1) : 0, // periodic incentive
     commissions: department === "Sales" ? s(9, 20) * 80 : 0,
     otherEarnings: 0,
-    // Deductions — computed from salary + timekeeping
-    govDeductions: statutoryDeductions(basic), // derived from basic
-    loans: totalLoans(a), // SSS/HDMF/PECEWA/coop loans + Pag-IBIG additional
-    cashAdvance: s(12, 4) === 0 ? 2000 : 0,
-    late: Math.round((rate / 60) * lateMinutes),
-    undertime: Math.round((rate / 60) * undertimeMinutes),
-    absences: Math.round(rate * 8 * absentDays),
-    lwop: lwopDeduction(basic, lwopDays), // derived from lwopDays
+  };
+
+  const deductionAmounts = {
+    loans: totalLoans(a), // SSS/HDMF/PECEWA/coop/other loans + Pag-IBIG additional
+    cashAdvance: deductions.cashAdvance,
+    // Each unpaid-time charge is derived from its own count, so a day is never
+    // deducted twice across the LWOP, absence and late lines.
+    late: lateDeduction(basic, tardyDays),
+    undertime: undertimeDeduction(basic, undertimeMinutes),
+    absences: absenceDeduction(basic, absentDays),
+    lwop: lwopDeduction(basic, lwopDays),
     otherDeductions: totalOtherDeductions(a), // HMO + Ded A + electric + mem ins
-    // Drivers
+  };
+
+  const drivers = {
     overtimeHours,
     nightDiffHours,
     lwopDays,
+    absentDays,
+    tardyDays,
+    undertimeMinutes,
+  };
+
+  return {
+    ...earnings,
+    ...deductionAmounts,
+    ...drivers,
+    // Derived from the contributable base per the configured rate table.
+    govDeductions: statutoryDeductions(
+      basic,
+      earningAmountsFor({
+        ...earnings,
+        ...deductionAmounts,
+        ...drivers,
+        govDeductions: 0,
+        employeeId,
+        employeeType,
+      }),
+    ),
   };
 }
 
 /** Build one payroll row from an employee, auto-computing all components. */
-function rowFor(e: Employee): PayrollRow {
+function rowFor(e: Employee, timekeeping?: TimekeepingInput): PayrollRow {
   const monthly = Math.round(e.salary / 12);
   // Prefer the employee's own classification; fall back to a stable seeded one.
   const employeeType = e.employmentType ?? TYPES[seeded(employeeSeed(e.id) + 1, TYPES.length)];
@@ -498,7 +820,14 @@ function rowFor(e: Employee): PayrollRow {
     employeeType,
     agency: e.agency ?? "",
     status: ROW_STATUS[seeded(employeeSeed(e.id) + 2, ROW_STATUS.length)],
-    ...computeComponents(e.id, monthly, employeeType, e.department),
+    ...computeComponents(
+      e.id,
+      monthly,
+      employeeType,
+      e.department,
+      deductionsFor(e.id),
+      timekeeping,
+    ),
   };
 }
 
@@ -513,34 +842,36 @@ export type PayrollOverrides = Record<string, Partial<PayrollComponents>>;
 /**
  * Derive a full payroll batch from the employee list (active + on-leave).
  *
- * When `lwopDaysByEmployee` is supplied (from a biometric attendance import),
- * an employee's LWOP days come from the punch data rather than the seeded
- * stand-in, and the LWOP deduction is recomputed from that count. Employees
- * absent from the map keep their existing seeded value.
+ * `timekeepingByEmployee` carries the biometric import's verdict for each
+ * employee — unpaid-leave days, unexcused absent days and pro-rated tardiness —
+ * which drive the LWOP, absence and late deductions respectively. Employees
+ * absent from the map have no timekeeping data and are charged nothing for
+ * unpaid time; approved **paid** leave never appears here at all, which is what
+ * stops filed leave from docking pay.
+ *
+ * Loan, cash-advance and HMO deductions are not passed in: they come from the
+ * ledgers set once via {@link setDeductionInputs}, the same way contribution
+ * rates do.
  *
  * When `overrides` is supplied (hand-edited amounts saved from Data Entry), the
  * edited components replace the derived ones and the row's derived fields are
- * re-run so gross/deductions/net stay consistent. Overrides win over the LWOP
- * import for any key they set.
+ * re-run so gross/deductions/net stay consistent. Overrides win over the
+ * imported timekeeping for any key they set.
  */
 export function buildPayrollRows(
   employees: Employee[],
-  lwopDaysByEmployee: Record<string, number> = {},
+  timekeepingByEmployee: TimekeepingByEmployee = {},
   overrides: PayrollOverrides = {},
 ): PayrollRow[] {
   return employees
     .filter((e) => e.status !== "inactive")
     .map((e) => {
-      const row = rowFor(e);
-      const imported = lwopDaysByEmployee[e.id];
-      // recalcDerived refreshes `lwop` (daily rate × days) from the new count.
-      const withLwop =
-        imported === undefined ? row : recalcDerived({ ...row, lwopDays: imported });
+      const row = rowFor(e, timekeepingByEmployee[e.id]);
       const edited = overrides[e.id];
-      if (!edited) return withLwop;
+      if (!edited) return row;
       // Overlay the saved edits, then re-derive so overtime/nightDiff/lwop/
-      // govDeductions reflect any edited driver or basic salary.
-      return recalcDerived({ ...withLwop, ...edited });
+      // absences/late/govDeductions reflect any edited driver or basic salary.
+      return recalcDerived({ ...row, ...edited });
     });
 }
 
@@ -552,7 +883,22 @@ export function buildPayrollRows(
 export function autoFillRow(row: PayrollRow): PayrollRow {
   return {
     ...row,
-    ...computeComponents(row.employeeId, row.basic, row.employeeType, row.department),
+    // Re-reads the live loan ledgers, but keeps the row's current timekeeping
+    // counts: auto-fill refreshes computed pay, it does not discard an imported
+    // (or hand-corrected) absence and tardiness record.
+    ...computeComponents(
+      row.employeeId,
+      row.basic,
+      row.employeeType,
+      row.department,
+      deductionsFor(row.employeeId),
+      {
+        absentDays: row.absentDays,
+        unpaidLeaveDays: row.lwopDays,
+        tardyDays: row.tardyDays,
+        undertimeMinutes: row.undertimeMinutes,
+      },
+    ),
   };
 }
 

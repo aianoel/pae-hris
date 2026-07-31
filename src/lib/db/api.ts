@@ -23,6 +23,7 @@ import type {
 } from "@/store/types";
 import type { ContributionRate } from "@/lib/contributions";
 import type { LeaveType } from "@/lib/leave";
+import type { LeaveRecord } from "@/lib/leaveRecords";
 import type { Loan } from "@/lib/loans";
 import type { LoanEntry } from "@/lib/employeeLoans";
 import type { PayrollRow } from "@/lib/payroll";
@@ -46,6 +47,7 @@ export interface AllData {
   loans: Loan[];
   employeeLoanEntries: LoanEntry[];
   leaveTypes: LeaveType[];
+  leaveRecords: LeaveRecord[];
 }
 
 /** Fetch a whole table (paged past the 1000-row default cap). */
@@ -83,7 +85,7 @@ export async function loadAll(): Promise<AllData> {
   const [
     employees, users, departments, agencies, attendanceRows, payrollRuns,
     payrollApprovals, reports, documents, roles, settingsRows, notifications,
-    logs, contributionRates, loans, employeeLoanEntries, leaveTypes,
+    logs, contributionRates, loans, employeeLoanEntries, leaveTypes, leaveRecords,
   ] = await Promise.all([
     fetchAll("employees", M.employeeFromRow),
     fetchAll("users", M.userFromRow),
@@ -102,6 +104,7 @@ export async function loadAll(): Promise<AllData> {
     fetchAllSoft("loans", M.loanFromRow),
     fetchAllSoft("employee_loan_entries", M.employeeLoanEntryFromRow),
     fetchAllSoft("leave_types", M.leaveTypeFromRow),
+    fetchAllSoft("leave_records", M.leaveRecordFromRow),
   ]);
 
   const empById = new Map(employees.map((e) => [e.id, e]));
@@ -115,6 +118,7 @@ export async function loadAll(): Promise<AllData> {
     payrollApprovals, reports, documents, roles,
     settings: settingsRows[0] ?? null,
     notifications, logs, contributionRates, loans, employeeLoanEntries, leaveTypes,
+    leaveRecords,
   };
 }
 
@@ -234,6 +238,12 @@ export const db = {
   upsertLeaveTypes: (ts: LeaveType[]) =>
     upsertMany("leave_types", ts.map(M.leaveTypeToRow)),
   deleteLeaveType: (id: string) => remove("leave_types", id),
+
+  // Leave records (filed applications)
+  upsertLeaveRecord: (r: LeaveRecord) => upsert("leave_records", M.leaveRecordToRow(r)),
+  upsertLeaveRecords: (rs: LeaveRecord[]) =>
+    upsertMany("leave_records", rs.map(M.leaveRecordToRow)),
+  deleteLeaveRecord: (id: string) => remove("leave_records", id),
 
   // Loans
   upsertLoan: (l: Loan) => upsert("loans", M.loanToRow(l)),

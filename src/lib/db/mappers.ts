@@ -20,6 +20,7 @@ import type {
 } from "@/store/types";
 import type { ContributionRate } from "@/lib/contributions";
 import type { LeaveType } from "@/lib/leave";
+import type { LeaveRecord } from "@/lib/leaveRecords";
 import type { Loan } from "@/lib/loans";
 import type { LoanEntry, LoanTabKey } from "@/lib/employeeLoans";
 import type { PayrollRow } from "@/lib/payroll";
@@ -237,6 +238,10 @@ export const payrollEntryToRow = (
   overtime_hours: row.overtimeHours,
   night_diff_hours: row.nightDiffHours,
   lwop_days: row.lwopDays,
+  // Unpaid-time drivers behind the absences/late/undertime amounts above.
+  absent_days: row.absentDays,
+  tardy_days: row.tardyDays,
+  undertime_minutes: row.undertimeMinutes,
 });
 
 // ---- Reports --------------------------------------------------------------
@@ -410,6 +415,45 @@ export const leaveTypeToRow = (t: Partial<LeaveType>): Record<string, unknown> =
   ...(t.requiresApproval !== undefined && { requires_approval: t.requiresApproval }),
   ...(t.status !== undefined && { status: t.status }),
   ...(t.createdAt !== undefined && { created_at: t.createdAt }),
+});
+
+// ---- Leave records (filed applications) -----------------------------------
+// leave_type_name/code and pay_rule are snapshots taken at filing time, not
+// joins: the record must keep the terms it was granted under even after the
+// catalogue entry is renamed or re-priced.
+export const leaveRecordFromRow = (r: any): LeaveRecord => ({
+  id: r.id,
+  employeeId: r.employee_id,
+  employeeName: r.employee_name ?? "",
+  leaveTypeId: r.leave_type_id,
+  leaveTypeName: r.leave_type_name ?? "",
+  leaveTypeCode: r.leave_type_code ?? "",
+  payRule: r.pay_rule,
+  startDate: typeof r.start_date === "string" ? r.start_date.slice(0, 10) : r.start_date,
+  endDate: typeof r.end_date === "string" ? r.end_date.slice(0, 10) : r.end_date,
+  reason: r.reason ?? "",
+  status: r.status,
+  decidedBy: r.decided_by ?? "",
+  decidedAt: r.decided_at ?? "",
+  createdAt: r.created_at,
+});
+export const leaveRecordToRow = (l: Partial<LeaveRecord>): Record<string, unknown> => ({
+  ...(l.id !== undefined && { id: l.id }),
+  ...(l.employeeId !== undefined && { employee_id: l.employeeId }),
+  ...(l.employeeName !== undefined && { employee_name: l.employeeName }),
+  ...(l.leaveTypeId !== undefined && { leave_type_id: l.leaveTypeId }),
+  ...(l.leaveTypeName !== undefined && { leave_type_name: l.leaveTypeName }),
+  ...(l.leaveTypeCode !== undefined && { leave_type_code: l.leaveTypeCode }),
+  ...(l.payRule !== undefined && { pay_rule: l.payRule }),
+  ...(l.startDate !== undefined && { start_date: l.startDate }),
+  ...(l.endDate !== undefined && { end_date: l.endDate }),
+  ...(l.reason !== undefined && { reason: l.reason }),
+  ...(l.status !== undefined && { status: l.status }),
+  // Empty strings mean "no decision yet"; the columns are nullable timestamps
+  // and text, so send NULL rather than '' (which a timestamptz would reject).
+  ...(l.decidedBy !== undefined && { decided_by: l.decidedBy || null }),
+  ...(l.decidedAt !== undefined && { decided_at: l.decidedAt || null }),
+  ...(l.createdAt !== undefined && { created_at: l.createdAt }),
 });
 
 // ---- Loans ----------------------------------------------------------------

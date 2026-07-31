@@ -10,7 +10,7 @@
 import type { Employee } from "@/store/types";
 import {
   buildPayrollRows,
-  statutoryBreakdown,
+  statutoryFor,
   ancillaryFor,
   carve,
   hourlyRate,
@@ -20,6 +20,7 @@ import {
   dailyRateFromMonthly,
   type PayrollRow,
   type PayrollOverrides,
+  type TimekeepingByEmployee,
 } from "@/lib/payroll";
 
 export { WORKING_DAYS_PER_YEAR, dailyRateFromMonthly };
@@ -406,7 +407,9 @@ export const DEDUCTION_REGISTER_FIELDS: RegisterField[] = [
  * OTHER DEDN line; edited below, the parts scale down proportionally.
  */
 function deptRegisterRow(row: PayrollRow): DeptRegisterRow {
-  const stat = statutoryBreakdown(row.basic);
+  // Statutory lines are bracketed against the row's contributable base (basic
+  // plus whichever earnings the Contribution Matrix includes), not basic alone.
+  const stat = statutoryFor(row);
   const a = ancillaryFor(row);
 
   // ---- Earnings — carve the lumped allowance into its itemised lines ----
@@ -439,26 +442,40 @@ function deptRegisterRow(row: PayrollRow): DeptRegisterRow {
   const gov = carve(row.govDeductions, [stat.sss, stat.philHealth, stat.pagIbig, stat.tax]);
   const [sss_cont, phic_cont, hdmf_cont, base_tax] = gov.parts;
 
-  // Loan lines carved out of the row's `loans` roll-up.
-  const loan = carve(row.loans, [a.sssLoan, a.hdmfLoan, a.pecewaLoan, a.coopLoan, a.pagibigAd]);
-  const [sss_loan, hdmf_loan, pecewa_loan, coop_loan, pagibig_ad] = loan.parts;
+  // Loan lines carved out of the row's `loans` roll-up. Company/bank loans and
+  // the fixed 2-/5-year ledger plans have no column of their own, so they are
+  // carved as an explicit part (landing on OTHER DEDN below) rather than left to
+  // the remainder — that way an edited-down roll-up scales them proportionally
+  // with the government loans instead of zeroing them first.
+  const loan = carve(row.loans, [
+    a.sssLoan,
+    a.hdmfLoan,
+    a.pecewaLoan,
+    a.coopLoan,
+    a.pagibigAd,
+    a.otherLoans,
+  ]);
+  const [sss_loan, hdmf_loan, pecewa_loan, coop_loan, pagibig_ad, other_loans] = loan.parts;
 
   // Other-deduction lines carved out of the row's `otherDeductions` roll-up.
   const other = carve(row.otherDeductions, [a.hmo, a.dedA, a.electricBill, a.memIns]);
   const [hmo_dedn, ded_a, electric_bill, mem_ins] = other.parts;
 
-  // LWOP is unpaid leave, distinct from the unplanned absences on the row. It
-  // comes straight from the row so a biometric import (or a hand-edited LWOP
-  // day count) is the number the register deducts.
+  // LWOP is approved-but-unpaid leave. It is deliberately distinct from
+  // `row.absences` (days missed without filing) and `row.late` (pro-rated
+  // tardiness), which the attendance import counts separately and which land on
+  // OTHER DEDN below — the same day is never charged on two lines.
   const lwop = row.lwop;
 
-  // Everything not itemised above — cash advance, late, undertime, absences —
-  // plus any surplus left over from the carved roll-ups.
+  // Everything not itemised above — cash advance, late, undertime, absences,
+  // the loans with no column of their own — plus any surplus left over from the
+  // carved roll-ups.
   const other_dedn =
     row.cashAdvance +
     row.late +
     row.undertime +
     row.absences +
+    other_loans +
     gov.remainder +
     loan.remainder +
     other.remainder;
@@ -655,14 +672,15 @@ function scaleRegisterRow(
  * period always returns the same money. The Paytype filter splits the
  * whole-month amounts: 1st/2nd half each pay ½.
  *
- * `lwopDaysByEmployee` (from a biometric attendance import) flows through to
- * the LWOP line, so imported unpaid days are deducted on the register too.
+ * `timekeepingByEmployee` (from a biometric attendance import) flows through to
+ * the LWOP, absence and late lines, so imported unpaid time is deducted on the
+ * register exactly as it is on the grid.
  */
 export function deptRegister(
   employees: Employee[],
   filters: ReportFilters,
   overrides: PayrollOverrides = {},
-  lwopDaysByEmployee: Record<string, number> = {},
+  timekeepingByEmployee: TimekeepingByEmployee = {},
   /**
    * The period's payroll runs. When given, employees whose agency has no run
    * are excluded, so the combined "All Agencies" view only reports staff that
@@ -673,7 +691,7 @@ export function deptRegister(
   const factor = payTypeFactor(filters.paytype);
   const inClass = filterByPayClass(employees, filters.payclass);
   let rows = filterRowsByAgency(
-    buildPayrollRows(inClass, lwopDaysByEmployee, overrides),
+    buildPayrollRows(inClass, timekeepingByEmployee, overrides),
     filters.agency,
   );
   if (periodRuns) rows = filterRowsByProcessedRuns(rows, periodRuns);

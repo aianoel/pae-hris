@@ -12,14 +12,10 @@ import { formatCurrency } from "@/lib/format";
 import {
   CONTRIBUTION_TYPES,
   validateRate,
-  defaultEarningsMatrix,
-  toggleEarning,
   type ContributionRate,
   type ContributionType,
   type RateStatus,
   type RateDraft,
-  type EarningCode,
-  type EarningsMatrix,
 } from "@/lib/contributions";
 import { matrixReport } from "@/lib/contributionReports";
 import { ContributionMatrix } from "@/components/contributions/ContributionMatrix";
@@ -64,6 +60,9 @@ export function ContributionsPage() {
     removeContributionRate,
     importContributionRates,
     removeContributionRatesBy,
+    earningsMatrix,
+    toggleMatrixEarning,
+    setMatrixEarnings,
   } = useStore();
   const { toast } = useToast();
   const fileRef = React.useRef<HTMLInputElement>(null);
@@ -72,14 +71,6 @@ export function ContributionsPage() {
   const [editing, setEditing] = React.useState<ContributionRate | null>(null);
   const [deleting, setDeleting] = React.useState<ContributionRate | null>(null);
   const [groupDeleteOpen, setGroupDeleteOpen] = React.useState(false);
-
-  // Contribution Matrix: which earning types count toward each contribution's
-  // base. Local UI config (no backend), seeded with sensible statutory defaults.
-  const [earningsMatrix, setEarningsMatrix] = React.useState<EarningsMatrix>(defaultEarningsMatrix);
-  const toggleMatrixEarning = (type: ContributionType, code: EarningCode) =>
-    setEarningsMatrix((m) => toggleEarning(m, type, code));
-  const setMatrixEarnings = (type: ContributionType, codes: EarningCode[]) =>
-    setEarningsMatrix((m) => ({ ...m, [type]: codes }));
 
   // ---- CRUD --------------------------------------------------------------
   const openCreate = () => {
