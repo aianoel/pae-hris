@@ -148,6 +148,29 @@
      dense payroll tables, and the backdrop must stay behind the data.
      ------------------------------------------------------------------ */
 
+  /* Photographic base, shared by every module. Desaturated to near-grey so
+     the wash above supplies all the colour, and masked to fade out down the
+     page — the image reads as texture at the top of the scroll area and is
+     gone entirely behind the dense tables further down. */
+  .module-photo {
+    background-image: url("/module-backdrop.jpg");
+    background-size: cover;
+    background-position: center top;
+    background-repeat: no-repeat;
+    opacity: 0.08;
+    filter: grayscale(1) contrast(1.05);
+    -webkit-mask-image: linear-gradient(to bottom, black, transparent 65%);
+    mask-image: linear-gradient(to bottom, black, transparent 65%);
+  }
+
+  /* Dark mode: the photo is darkened rather than dimmed further, so it keeps
+     some shape against the near-black background without lifting the page's
+     effective contrast floor. */
+  .dark .module-photo {
+    opacity: 0.1;
+    filter: grayscale(1) brightness(0.55);
+  }
+
   /* Two off-screen radial blooms. Positioned outside the box so only the
      soft falloff is visible — no discernible circle edge. */
   .module-wash {
