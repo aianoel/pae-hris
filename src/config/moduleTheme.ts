@@ -27,6 +27,9 @@ const MODULE_THEMES: Record<string, ModuleTheme> = {
   // Overview — the app's primary blue, kept for the landing surfaces.
   "/": { hue: 221, pattern: "grid" },
   "/analytics": { hue: 199, pattern: "diagonal" },
+  // Self-service — a warm teal, distinct from every admin module so an
+  // employee can tell at a glance they're looking at their own records.
+  "/my": { hue: 168, pattern: "rings" },
 
   // People — violet through indigo.
   "/users": { hue: 262, pattern: "dots" },

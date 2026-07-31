@@ -1,5 +1,6 @@
 import {
   LayoutDashboard,
+  CircleUser,
   BarChart3,
   Users,
   IdCard,
@@ -28,6 +29,9 @@ export interface NavItem {
 
 export const navItems: NavItem[] = [
   { label: "Dashboard", to: "/", icon: LayoutDashboard, group: "Overview" },
+  // Self-service. Always reachable (see ALWAYS_ALLOWED in lib/access.ts) — an
+  // employee reads their own records without needing a module grant.
+  { label: "My Workspace", to: "/my", icon: CircleUser, group: "Overview" },
   { label: "Analytics", to: "/analytics", icon: BarChart3, group: "Overview" },
 
   { label: "Users", to: "/users", icon: Users, group: "People" },

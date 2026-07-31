@@ -10,10 +10,14 @@ import { navItems, type NavItem } from "@/config/nav";
 export const ALL_ACCESS = "*";
 
 /**
- * Dashboard is the landing route and is always reachable, so every user needs
- * it regardless of their configured access — otherwise login would dead-end.
+ * Routes every signed-in user may open regardless of their configured access.
+ *
+ * Dashboard is the landing route — without it login would dead-end. My
+ * Workspace is self-service: it shows only the viewer's own payslips, leave and
+ * attendance, so there is nothing to gate. Making it grantable would mean an
+ * employee could be denied sight of their own pay.
  */
-export const ALWAYS_ALLOWED = ["/"];
+export const ALWAYS_ALLOWED = ["/", "/my"];
 
 /** Modules an admin can grant/revoke, in sidebar order (Dashboard excluded). */
 export const CONTROLLABLE_MODULES: NavItem[] = navItems.filter(

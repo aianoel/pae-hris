@@ -9,6 +9,7 @@ import { useAuth } from "@/store/auth-context";
 import { AppLayout } from "@/components/layout/AppLayout";
 import { RequireAccess } from "@/components/layout/RequireAccess";
 import { DashboardPage } from "@/pages/DashboardPage";
+import { MyWorkspacePage } from "@/pages/MyWorkspacePage";
 import { AnalyticsPage } from "@/pages/AnalyticsPage";
 import { EmployeesPage } from "@/pages/EmployeesPage";
 import { UsersPage } from "@/pages/UsersPage";
@@ -57,6 +58,10 @@ const router = createBrowserRouter([
     element: <RequireAuth />,
     children: [
       { index: true, element: <DashboardPage /> },
+      // Self-service: deliberately outside RequireAccess. Every signed-in user
+      // may read their own payslips, leave and attendance regardless of which
+      // admin modules they've been granted.
+      { path: "my", element: <MyWorkspacePage /> },
       { path: "analytics", element: <RequireAccess><AnalyticsPage /></RequireAccess> },
       { path: "employees", element: <RequireAccess><EmployeesPage /></RequireAccess> },
       { path: "users", element: <RequireAccess><UsersPage /></RequireAccess> },
