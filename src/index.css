@@ -139,6 +139,124 @@
     text-wrap: balance;
   }
 
+  /* ------------------------------------------------------------------
+     Per-module backdrop (see ModuleBackdrop.tsx / config/moduleTheme.ts)
+
+     Every colour below is derived from the --module-hue custom property
+     set inline by the component, so adding a module means picking a hue
+     and nothing else. Opacities are deliberately low: these pages carry
+     dense payroll tables, and the backdrop must stay behind the data.
+     ------------------------------------------------------------------ */
+
+  /* Two off-screen radial blooms. Positioned outside the box so only the
+     soft falloff is visible — no discernible circle edge. */
+  .module-wash {
+    background-image:
+      radial-gradient(
+        60rem 40rem at 12% -10%,
+        hsl(var(--module-hue) 85% 55% / 0.09),
+        transparent 60%
+      ),
+      radial-gradient(
+        50rem 36rem at 105% 8%,
+        hsl(calc(var(--module-hue) + 28) 80% 58% / 0.07),
+        transparent 62%
+      );
+  }
+
+  /* Dark mode: same hues need more punch to register against a near-black
+     background, but stay dim enough to keep table text high-contrast. */
+  .dark .module-wash {
+    background-image:
+      radial-gradient(
+        60rem 40rem at 12% -10%,
+        hsl(var(--module-hue) 90% 62% / 0.14),
+        transparent 60%
+      ),
+      radial-gradient(
+        50rem 36rem at 105% 8%,
+        hsl(calc(var(--module-hue) + 28) 85% 65% / 0.10),
+        transparent 62%
+      );
+  }
+
+  /* Shared pattern setup. The mask fades the motif out down the page so it
+     never terminates in a hard line where the scroll area ends. */
+  .module-pattern {
+    opacity: 0.5;
+    -webkit-mask-image: linear-gradient(to bottom, black, transparent 70%);
+    mask-image: linear-gradient(to bottom, black, transparent 70%);
+  }
+
+  .dark .module-pattern {
+    opacity: 0.4;
+  }
+
+  /* Motif 1 — engineering grid. */
+  .module-pattern-grid {
+    background-image:
+      linear-gradient(to right, hsl(var(--module-hue) 60% 45% / 0.05) 1px, transparent 1px),
+      linear-gradient(to bottom, hsl(var(--module-hue) 60% 45% / 0.05) 1px, transparent 1px);
+    background-size: 44px 44px;
+  }
+
+  .dark .module-pattern-grid {
+    background-image:
+      linear-gradient(to right, hsl(var(--module-hue) 70% 70% / 0.06) 1px, transparent 1px),
+      linear-gradient(to bottom, hsl(var(--module-hue) 70% 70% / 0.06) 1px, transparent 1px);
+  }
+
+  /* Motif 2 — dot matrix. */
+  .module-pattern-dots {
+    background-image: radial-gradient(
+      hsl(var(--module-hue) 60% 45% / 0.10) 1px,
+      transparent 1px
+    );
+    background-size: 26px 26px;
+  }
+
+  .dark .module-pattern-dots {
+    background-image: radial-gradient(
+      hsl(var(--module-hue) 70% 70% / 0.10) 1px,
+      transparent 1px
+    );
+  }
+
+  /* Motif 3 — diagonal hatch. */
+  .module-pattern-diagonal {
+    background-image: repeating-linear-gradient(
+      45deg,
+      hsl(var(--module-hue) 60% 45% / 0.045) 0 1px,
+      transparent 1px 14px
+    );
+  }
+
+  .dark .module-pattern-diagonal {
+    background-image: repeating-linear-gradient(
+      45deg,
+      hsl(var(--module-hue) 70% 70% / 0.055) 0 1px,
+      transparent 1px 14px
+    );
+  }
+
+  /* Motif 4 — concentric rings, anchored top-right so the arcs read as a
+     large sweep rather than a tileable texture. */
+  .module-pattern-rings {
+    background-image: repeating-radial-gradient(
+      circle at 92% -4%,
+      hsl(var(--module-hue) 60% 45% / 0.05) 0 1px,
+      transparent 1px 68px
+    );
+  }
+
+  .dark .module-pattern-rings {
+    background-image: repeating-radial-gradient(
+      circle at 92% -4%,
+      hsl(var(--module-hue) 70% 70% / 0.06) 0 1px,
+      transparent 1px 68px
+    );
+  }
+
   /* Autofill styling so inputs stay on-brand */
   input:-webkit-autofill,
   input:-webkit-autofill:hover,

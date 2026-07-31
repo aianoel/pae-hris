@@ -5,6 +5,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { Topbar } from "@/components/layout/Topbar";
 import { CommandPalette } from "@/components/layout/CommandPalette";
+import { ModuleBackdrop } from "@/components/layout/ModuleBackdrop";
 import { Drawer, DrawerContent } from "@/components/ui/drawer";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
 
@@ -55,8 +56,26 @@ export function AppLayout() {
           onOpenMobileNav={() => setMobileNav(true)}
         />
 
-        <main className="flex-1 overflow-y-auto">
-          <div className="w-full px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
+        {/* `relative` anchors the backdrop; it stays put while content scrolls
+            over it, so the wash reads as a fixed surface rather than a banner
+            that slides away. */}
+        <main className="relative flex-1 overflow-y-auto">
+          <AnimatePresence mode="wait">
+            {/* Keyed on pathname so the backdrop cross-fades with the page —
+                a route change swaps hue and motif together. */}
+            <motion.div
+              key={`backdrop-${pathname}`}
+              className="absolute inset-0"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.4, ease: "easeOut" }}
+            >
+              <ModuleBackdrop pathname={pathname} />
+            </motion.div>
+          </AnimatePresence>
+
+          <div className="relative w-full px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
             <AnimatePresence mode="wait">
               <motion.div
                 key={pathname}
