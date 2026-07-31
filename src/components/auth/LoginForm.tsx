@@ -10,7 +10,7 @@ import { useToast } from "@/components/ui/toast";
 import { useAuth } from "@/store/auth-context";
 import { Logo } from "@/components/brand/Logo";
 import { FloatingField } from "@/components/auth/FloatingField";
-import { SocialButtons } from "@/components/auth/SocialButtons";
+import { SocialButtons, type SocialProvider } from "@/components/auth/SocialButtons";
 import { validateEmail, validatePassword } from "@/lib/validation";
 import { cn } from "@/lib/utils";
 
@@ -21,7 +21,7 @@ interface FieldState {
 
 export function LoginForm() {
   const { toast } = useToast();
-  const { login, sendPasswordReset } = useAuth();
+  const { login, loginWithProvider, sendPasswordReset } = useAuth();
   const navigate = useNavigate();
 
   const [email, setEmail] = React.useState<FieldState>({ value: "", touched: false });
@@ -30,6 +30,8 @@ export function LoginForm() {
   const [remember, setRemember] = React.useState(true);
   const [loading, setLoading] = React.useState(false);
   const [sendingReset, setSendingReset] = React.useState(false);
+  // Which OAuth provider is mid-hand-off, if any.
+  const [pending, setPending] = React.useState<SocialProvider | null>(null);
   const [shake, setShake] = React.useState(false);
 
   const emailError = validateEmail(email.value);
@@ -107,12 +109,22 @@ export function LoginForm() {
     }
   };
 
-  const handleProvider = (provider: "google" | "microsoft") => {
-    toast({
-      variant: "info",
-      title: `Continue with ${provider === "google" ? "Google" : "Microsoft"}`,
-      description: "This is a demo — no external redirect was performed.",
-    });
+  // Hand off to the provider. On success the browser navigates away, so
+  // `pending` is deliberately left set — clearing it would flash the buttons
+  // back to their idle state during the redirect.
+  const handleProvider = async (provider: SocialProvider) => {
+    setPending(provider);
+    const res = await loginWithProvider(provider === "microsoft" ? "azure" : "google");
+
+    if (!res.ok) {
+      setPending(null);
+      triggerShake();
+      toast({
+        variant: "error",
+        title: `Couldn't continue with ${provider === "google" ? "Google" : "Microsoft"}`,
+        description: res.error ?? "Please try again in a moment.",
+      });
+    }
   };
 
   return (
@@ -219,6 +231,9 @@ export function LoginForm() {
           type="submit"
           size="xl"
           loading={loading}
+          // Block the password path while an OAuth redirect is in flight, so
+          // the two sign-in routes can't race each other.
+          disabled={Boolean(pending)}
           className="mt-2 w-full"
         >
           {loading ? "Signing in…" : "Sign in"}
@@ -233,7 +248,7 @@ export function LoginForm() {
         <span className="h-px flex-1 bg-border" />
       </div>
 
-      <SocialButtons disabled={loading} onProvider={handleProvider} />
+      <SocialButtons disabled={loading} pending={pending} onProvider={handleProvider} />
 
       <p className="mt-8 text-center text-sm text-muted-foreground">
         Don&apos;t have an account?{" "}

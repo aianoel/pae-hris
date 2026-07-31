@@ -21,9 +21,18 @@ export interface AuthUser {
   access: string[];
 }
 
+/** Third-party identity providers offered on the sign-in screen. */
+export type OAuthProvider = "google" | "azure";
+
 export interface AuthContextValue {
   user: AuthUser | null;
   login: (email: string, password: string) => Promise<boolean>;
+  /**
+   * Start an OAuth sign-in. On success the browser is handed to the provider,
+   * so this only ever returns on failure — the caller should surface the error
+   * and otherwise expect the page to be navigating away.
+   */
+  loginWithProvider: (provider: OAuthProvider) => Promise<{ ok: boolean; error?: string }>;
   logout: () => void;
   /** True when the signed-in user has unrestricted (admin) access. */
   isAdmin: boolean;

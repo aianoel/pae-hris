@@ -79,6 +79,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     [users],
   );
 
+  // Held in a ref so the auth subscription below can log without taking addLog
+  // as a dependency — it changes identity on every store update, which would
+  // tear down and re-create the Supabase listener continuously.
+  const addLogRef = React.useRef(addLog);
+  React.useEffect(() => {
+    addLogRef.current = addLog;
+  }, [addLog]);
+
   // Restore an existing Supabase session on mount and keep in sync.
   React.useEffect(() => {
     if (!isSupabaseConfigured || !supabase) return;
@@ -99,7 +107,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (event === "PASSWORD_RECOVERY") setRecovery(true);
       if (event === "SIGNED_OUT") setRecovery(false);
       const email = session?.user?.email;
-      setUser(email ? resolveAppUser(email) : null);
+      const next = email ? resolveAppUser(email) : null;
+      setUser(next);
+
+      // An OAuth redirect lands here rather than in login(), which writes its
+      // own audit entry — so record the sign-in for that path. Restricted to
+      // SIGNED_IN with a third-party identity: a restored session on reload
+      // also fires SIGNED_IN, and that is not a new sign-in event.
+      if (event === "SIGNED_IN" && next) {
+        const provider = session?.user?.app_metadata?.provider;
+        if (provider && provider !== "email") {
+          setActiveActor(next.name || next.email, next.email);
+          addLogRef.current("auth", `signed in via ${provider} (${next.email})`, "login");
+        }
+      }
     });
 
     return () => {
@@ -149,6 +170,43 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       return true;
     },
     [resolveAppUser, addLog],
+  );
+
+  // Hand off to a third-party identity provider. supabase-js redirects the
+  // browser to the provider; the user returns to `redirectTo` with a session in
+  // the URL, which supabase-js exchanges and reports via onAuthStateChange —
+  // the same path a password login ends up on, so no extra wiring is needed to
+  // resolve the app profile.
+  //
+  // Sign-in only, never sign-up: the provider proves who someone is, but the
+  // app `users` row is what grants module access. An unknown email resolves to
+  // the dashboard-only profile in resolveAppUser rather than being provisioned.
+  const loginWithProvider = React.useCallback<AuthContextValue["loginWithProvider"]>(
+    async (provider) => {
+      if (!isSupabaseConfigured || !supabase) {
+        return { ok: false, error: "A Supabase backend is required to sign in." };
+      }
+
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider,
+        options: {
+          // Return to the app's own origin. In production this must also be
+          // listed under Supabase → Authentication → URL Configuration, or the
+          // provider will refuse the callback.
+          redirectTo: window.location.origin,
+        },
+      });
+
+      if (error) {
+        addLog("auth", `failed ${provider} sign-in: ${error.message}`, "login");
+        return { ok: false, error: error.message };
+      }
+
+      // Redirecting — the audit entry for the completed sign-in is written when
+      // the session lands back in onAuthStateChange.
+      return { ok: true };
+    },
+    [addLog],
   );
 
   // Create a Supabase Auth credential for a new app user. A client-side signUp
@@ -263,6 +321,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     () => ({
       user,
       login,
+      loginWithProvider,
       logout,
       isAdmin: hasFullAccess(user?.access),
       signUpUser,
@@ -270,7 +329,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       recovery,
       completePasswordReset,
     }),
-    [user, login, logout, signUpUser, sendPasswordReset, recovery, completePasswordReset],
+    [
+      user,
+      login,
+      loginWithProvider,
+      logout,
+      signUpUser,
+      sendPasswordReset,
+      recovery,
+      completePasswordReset,
+    ],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
