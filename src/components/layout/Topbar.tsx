@@ -23,6 +23,7 @@ import { Breadcrumbs } from "@/components/layout/Breadcrumbs";
 import { NotificationCenter } from "@/components/layout/NotificationCenter";
 import { ThemeToggle } from "@/components/layout/ThemeToggle";
 import { Kbd } from "@/components/ui/kbd";
+import { canAccess } from "@/lib/access";
 import { useAuth } from "@/store/auth-context";
 
 interface TopbarProps {
@@ -37,6 +38,8 @@ export function Topbar({ onOpenSearch, onOpenMobileNav }: TopbarProps) {
   const email = user?.email ?? "maya@aurora.app";
   const initials = user?.initials ?? "MK";
   const role = user?.role ?? "Administrator";
+  const canOpenSettings = canAccess(user?.access, "/settings");
+  const canOpenPayroll = canAccess(user?.access, "/payroll");
 
   return (
     <header className="sticky top-0 z-40 border-b border-border/70 bg-background/70 backdrop-blur-xl">
@@ -98,15 +101,29 @@ export function Topbar({ onOpenSearch, onOpenMobileNav }: TopbarProps) {
                 </div>
               </div>
               <DropdownMenuSeparator />
-              <DropdownMenuItem onSelect={() => navigate("/settings")}>
-                <User /> Profile
-              </DropdownMenuItem>
-              <DropdownMenuItem onSelect={() => navigate("/settings")}>
-                <Settings /> Settings
-              </DropdownMenuItem>
-              <DropdownMenuItem onSelect={() => navigate("/payroll")}>
-                <CreditCard /> Billing
-              </DropdownMenuItem>
+              {/* An employee session can't open Settings or Payroll, so those
+                  entries would only lead to the "access restricted" card. Point
+                  Profile at My Workspace — the one place their own record lives
+                  — and drop the admin-only items entirely. */}
+              {canOpenSettings ? (
+                <>
+                  <DropdownMenuItem onSelect={() => navigate("/settings")}>
+                    <User /> Profile
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onSelect={() => navigate("/settings")}>
+                    <Settings /> Settings
+                  </DropdownMenuItem>
+                </>
+              ) : (
+                <DropdownMenuItem onSelect={() => navigate("/my")}>
+                  <User /> My Workspace
+                </DropdownMenuItem>
+              )}
+              {canOpenPayroll && (
+                <DropdownMenuItem onSelect={() => navigate("/payroll")}>
+                  <CreditCard /> Billing
+                </DropdownMenuItem>
+              )}
               <DropdownMenuItem>
                 <LifeBuoy /> Support
               </DropdownMenuItem>

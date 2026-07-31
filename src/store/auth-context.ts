@@ -31,11 +31,31 @@ export interface AuthContextValue {
    * Start an OAuth sign-in. On success the browser is handed to the provider,
    * so this only ever returns on failure — the caller should surface the error
    * and otherwise expect the page to be navigating away.
+   *
+   * Whether the identity is ADMITTED is decided after the redirect, once the
+   * provider returns an email to check against the HR roster. A refusal
+   * therefore can't come back through this promise; it lands in
+   * {@link AuthContextValue.deniedReason}.
    */
   loginWithProvider: (provider: OAuthProvider) => Promise<{ ok: boolean; error?: string }>;
   logout: () => void;
   /** True when the signed-in user has unrestricted (admin) access. */
   isAdmin: boolean;
+  /**
+   * True when the session came from Google/Microsoft. Such sessions are
+   * employee self-service only, regardless of any `users` row for the same
+   * address — see lib/oauthAccess.ts.
+   */
+  isEmployeeSession: boolean;
+  /** Which provider backs the session: "email", "google", "azure", or null. */
+  sessionProvider: string | null;
+  /**
+   * Set when a sign-in was refused after the OAuth redirect (not on the roster,
+   * inactive, or unverifiable). Displayed on the login screen; null otherwise.
+   */
+  deniedReason: string | null;
+  /** Dismiss {@link AuthContextValue.deniedReason}. */
+  clearDenied: () => void;
   /**
    * Provision a Supabase Auth credential for a newly-created app user so they
    * can actually sign in. Preserves the current (admin) session across the

@@ -40,6 +40,17 @@ function RequireAuth() {
   return <AppLayout />;
 }
 
+/**
+ * The index route. An employee signed in via Google/Microsoft has no admin
+ * modules, so the org dashboard would show them a wall of empty KPI cards and
+ * "no access" — send them to their own workspace instead.
+ */
+function HomeRoute() {
+  const { isEmployeeSession } = useAuth();
+  if (isEmployeeSession) return <Navigate to="/my" replace />;
+  return <DashboardPage />;
+}
+
 /** Keeps authenticated users away from the login screen. */
 function LoginRoute() {
   const { user, recovery } = useAuth();
@@ -57,7 +68,7 @@ const router = createBrowserRouter([
     path: "/",
     element: <RequireAuth />,
     children: [
-      { index: true, element: <DashboardPage /> },
+      { index: true, element: <HomeRoute /> },
       // Self-service: deliberately outside RequireAccess. Every signed-in user
       // may read their own payslips, leave and attendance regardless of which
       // admin modules they've been granted.

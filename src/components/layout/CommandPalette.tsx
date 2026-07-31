@@ -12,6 +12,8 @@ import {
 } from "lucide-react";
 
 import { navItems } from "@/config/nav";
+import { canAccess } from "@/lib/access";
+import { useAuth } from "@/store/auth-context";
 import { useTheme } from "@/components/providers/ThemeProvider";
 import { cn } from "@/lib/utils";
 
@@ -23,6 +25,28 @@ interface CommandPaletteProps {
 export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
   const navigate = useNavigate();
   const { theme, toggleTheme } = useTheme();
+  const { user, isEmployeeSession } = useAuth();
+
+  // Mirror the sidebar: the palette is a second way to reach every module, so
+  // it has to respect the same access list. An employee signed in via Google
+  // would otherwise find "Payroll" here and land on the "access restricted"
+  // card — offering a door that is known to be locked.
+  const reachable = React.useMemo(
+    () =>
+      navItems.filter(
+        (i) => canAccess(user?.access, i.to) && !(isEmployeeSession && i.to === "/"),
+      ),
+    [user?.access, isEmployeeSession],
+  );
+  const quickActions = React.useMemo(
+    () =>
+      [
+        { to: "/employees", icon: UserPlus, label: "Add employee" },
+        { to: "/reports", icon: FileBarChart, label: "Create report" },
+        { to: "/payroll", icon: Plus, label: "Generate payroll" },
+      ].filter((a) => canAccess(user?.access, a.to)),
+    [user?.access],
+  );
 
   const run = React.useCallback(
     (fn: () => void) => {
@@ -69,21 +93,14 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
             heading="Quick actions"
             className="px-2 pb-1 pt-2 text-[0.7rem] font-semibold uppercase tracking-wider text-muted-foreground [&_[cmdk-group-items]]:mt-1"
           >
-            <PaletteItem
-              icon={<UserPlus className="h-4 w-4" />}
-              label="Add employee"
-              onSelect={() => run(() => navigate("/employees"))}
-            />
-            <PaletteItem
-              icon={<FileBarChart className="h-4 w-4" />}
-              label="Create report"
-              onSelect={() => run(() => navigate("/reports"))}
-            />
-            <PaletteItem
-              icon={<Plus className="h-4 w-4" />}
-              label="Generate payroll"
-              onSelect={() => run(() => navigate("/payroll"))}
-            />
+            {quickActions.map(({ to, icon: Icon, label }) => (
+              <PaletteItem
+                key={to}
+                icon={<Icon className="h-4 w-4" />}
+                label={label}
+                onSelect={() => run(() => navigate(to))}
+              />
+            ))}
             <PaletteItem
               icon={theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
               label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
@@ -95,7 +112,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
             heading="Navigation"
             className="px-2 pb-1 pt-2 text-[0.7rem] font-semibold uppercase tracking-wider text-muted-foreground [&_[cmdk-group-items]]:mt-1"
           >
-            {navItems.map((item) => (
+            {reachable.map((item) => (
               <PaletteItem
                 key={item.to}
                 icon={<item.icon className="h-4 w-4" />}

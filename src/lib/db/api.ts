@@ -141,6 +141,30 @@ async function remove(table: string, id: string | number) {
   if (error) throw error;
 }
 
+/**
+ * Look up a single employee by email.
+ *
+ * OAuth admission needs the roster the instant the callback session lands,
+ * which is before (or racing) the store's bulk `loadAll()` — checking against
+ * the in-memory list at that moment would see an empty array and lock out every
+ * legitimate employee. This asks the backend directly instead.
+ *
+ * `employees.email` is citext, so the match is case-insensitive server-side.
+ * Returns null for "no such employee", and throws only on a real transport or
+ * permission error, so the caller can distinguish "not staff" from "couldn't
+ * check" and avoid denying access on a network blip.
+ */
+async function fetchEmployeeByEmail(email: string): Promise<Employee | null> {
+  const sb = requireSupabase();
+  const { data, error } = await sb
+    .from("employees")
+    .select("*")
+    .eq("email", email.trim().toLowerCase())
+    .maybeSingle();
+  if (error) throw error;
+  return data ? M.employeeFromRow(data) : null;
+}
+
 // ---- Per-entity write-through --------------------------------------------
 export const db = {
   configured: () => Boolean(supabase),
@@ -149,6 +173,7 @@ export const db = {
   upsertEmployee: (e: Employee) => upsert("employees", M.employeeToRow(e)),
   deleteEmployee: (id: string) => remove("employees", id),
   upsertEmployees: (es: Employee[]) => upsertMany("employees", es.map(M.employeeToRow)),
+  employeeByEmail: (email: string) => fetchEmployeeByEmail(email),
 
   // Users
   upsertUser: (u: User) => upsert("users", M.userToRow(u)),

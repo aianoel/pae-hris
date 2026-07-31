@@ -31,9 +31,13 @@ function needsExactMatch(to: string) {
 }
 
 export function Sidebar({ collapsed, onToggle }: SidebarProps) {
-  const { user } = useAuth();
-  // Only show modules this user may open (admins see everything).
-  const visibleItems = navItems.filter((i) => canAccess(user?.access, i.to));
+  const { user, isEmployeeSession } = useAuth();
+  // Only show modules this user may open (admins see everything). Dashboard is
+  // dropped for employee sessions: HomeRoute redirects "/" straight to "/my"
+  // for them, so the link would be a second button for the item below it.
+  const visibleItems = navItems.filter(
+    (i) => canAccess(user?.access, i.to) && !(isEmployeeSession && i.to === "/"),
+  );
   return (
     <TooltipProvider delayDuration={0}>
       <aside

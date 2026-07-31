@@ -1,7 +1,7 @@
 import * as React from "react";
 import { useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
-import { Eye, EyeOff, Lock, Mail } from "lucide-react";
+import { Eye, EyeOff, Lock, Mail, ShieldAlert, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -21,7 +21,7 @@ interface FieldState {
 
 export function LoginForm() {
   const { toast } = useToast();
-  const { login, loginWithProvider, sendPasswordReset } = useAuth();
+  const { login, loginWithProvider, sendPasswordReset, deniedReason, clearDenied } = useAuth();
   const navigate = useNavigate();
 
   const [email, setEmail] = React.useState<FieldState>({ value: "", touched: false });
@@ -43,6 +43,20 @@ export function LoginForm() {
     // next frame so the animation can restart
     requestAnimationFrame(() => setShake(true));
   }, []);
+
+  // A provider sign-in that was refused server-side lands back here after the
+  // redirect, so the rejection arrives on mount rather than from a click. Clear
+  // the spinner and announce it once.
+  React.useEffect(() => {
+    if (!deniedReason) return;
+    setPending(null);
+    triggerShake();
+    toast({
+      variant: "error",
+      title: "Sign-in not permitted",
+      description: deniedReason,
+    });
+  }, [deniedReason, toast, triggerShake]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -149,6 +163,30 @@ export function LoginForm() {
         </p>
       </div>
 
+      {/* Persistent refusal notice. The toast above announces it, but auto-
+          dismisses after a few seconds — someone who was just bounced out of a
+          provider redirect needs the reason to stay on screen. */}
+      {deniedReason && (
+        <div
+          role="alert"
+          className="mb-6 flex items-start gap-3 rounded-xl border border-destructive/30 bg-destructive/5 p-4"
+        >
+          <ShieldAlert className="mt-0.5 h-[18px] w-[18px] shrink-0 text-destructive" />
+          <div className="flex-1">
+            <p className="text-sm font-semibold text-foreground">Sign-in not permitted</p>
+            <p className="mt-0.5 text-sm text-muted-foreground">{deniedReason}</p>
+          </div>
+          <button
+            type="button"
+            onClick={clearDenied}
+            className="rounded text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            aria-label="Dismiss"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+      )}
+
       <form onSubmit={handleSubmit} noValidate className="space-y-4">
         <FloatingField
           id="email"
@@ -243,12 +281,19 @@ export function LoginForm() {
       <div className="my-7 flex items-center gap-4">
         <span className="h-px flex-1 bg-border" />
         <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-          or continue with
+          employee sign-in
         </span>
         <span className="h-px flex-1 bg-border" />
       </div>
 
       <SocialButtons disabled={loading} pending={pending} onProvider={handleProvider} />
+
+      {/* Set expectations before the redirect: being refused after a round-trip
+          through Google is a poor way to learn the rule. */}
+      <p className="mt-3 text-center text-xs text-muted-foreground">
+        For staff with a work email on the HR roster. Opens your own payslips,
+        leave and attendance.
+      </p>
 
       <p className="mt-8 text-center text-sm text-muted-foreground">
         Don&apos;t have an account?{" "}

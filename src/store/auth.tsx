@@ -4,11 +4,22 @@ import { useStore } from "@/store/store-context";
 import { hasFullAccess } from "@/lib/access";
 import { supabase, isSupabaseConfigured } from "@/lib/supabase";
 import { setActiveActor } from "@/lib/clientInfo";
+import { db } from "@/lib/db/api";
+import {
+  EMPLOYEE_ROLE,
+  OAUTH_SCOPES,
+  admitOAuthEmployee,
+  employeeSessionAccess,
+  isThirdPartyProvider,
+  oauthRejectionMessage,
+  providerLabel,
+} from "@/lib/oauthAccess";
 import {
   AuthContext,
   type AuthUser,
   type AuthContextValue,
 } from "@/store/auth-context";
+import type { Employee } from "@/store/types";
 
 /**
  * Auth session.
@@ -17,6 +28,15 @@ import {
  * restored/persisted by supabase-js. The signed-in email is then matched to an
  * app `users` row to carry the per-module access list that gates the
  * sidebar/routes.
+ *
+ * There are two ways in, and they are NOT equivalent:
+ *
+ *   • Email + password — resolves against the app `users` table, so it can
+ *     carry any access list including admin ('*').
+ *   • Google / Microsoft — employees only. The provider proves identity; the
+ *     HR roster decides employment. The email must match an `employees` row,
+ *     and the resulting session is clamped to self-service access no matter
+ *     what `users` says. See lib/oauthAccess.ts for why.
  *
  * There is NO offline/in-memory login path and NO break-glass credential: a
  * configured Supabase backend is mandatory (the app refuses to mount without
@@ -79,6 +99,25 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     [users],
   );
 
+  /**
+   * Build the session for an employee admitted via a social provider.
+   *
+   * Access is the always-allowed self-service set and the role is the fixed
+   * EMPLOYEE_ROLE — deliberately NOT the `users` row and NOT `employee.role`
+   * (a free-text job title, which could read "HR" and quietly satisfy
+   * canManageLeave). A third-party identity gets exactly one shape of session.
+   */
+  const employeeAuthUser = React.useCallback((employee: Employee): AuthUser => {
+    return {
+      id: employee.id,
+      name: employee.name,
+      email: employee.email,
+      role: EMPLOYEE_ROLE,
+      initials: initialsOf(employee.name || employee.email),
+      access: employeeSessionAccess(),
+    };
+  }, []);
+
   // Held in a ref so the auth subscription below can log without taking addLog
   // as a dependency — it changes identity on every store update, which would
   // tear down and re-create the Supabase listener continuously.
@@ -87,55 +126,163 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     addLogRef.current = addLog;
   }, [addLog]);
 
+  // The provider backing the CURRENT session ("email" for password sign-in).
+  // Held as state so the context value re-renders when it changes, and mirrored
+  // into a ref for the re-resolve effect below, which must read it without
+  // taking it as a dependency. Keeps an OAuth session clamped: a later change
+  // to the `users` table must not silently widen its access.
+  const [sessionProvider, setSessionProvider] = React.useState<string | null>(null);
+  const sessionProviderRef = React.useRef<string | null>(null);
+  const setProvider = React.useCallback((p: string | null) => {
+    sessionProviderRef.current = p;
+    setSessionProvider(p);
+  }, []);
+
+  // Why a session was refused, surfaced on the login screen. OAuth rejection
+  // happens after the redirect — there is no in-flight promise left to return
+  // it to, so it is held here and read by LoginForm.
+  const [deniedReason, setDeniedReason] = React.useState<string | null>(null);
+
   // Restore an existing Supabase session on mount and keep in sync.
   React.useEffect(() => {
     if (!isSupabaseConfigured || !supabase) return;
+    const sb = supabase;
     let active = true;
 
-    supabase.auth.getSession().then(({ data }) => {
-      const email = data.session?.user?.email;
-      if (active && email) {
-        setUser(resolveAppUser(email));
+    /**
+     * Turn a Supabase session into an app session, vetting third-party
+     * identities against the HR roster first.
+     *
+     * `announce` is false when merely restoring an existing session on load —
+     * a reload is not a new sign-in and must not write an audit entry.
+     */
+    const applySession = async (
+      session: { user?: { email?: string; app_metadata?: { provider?: string } } } | null,
+      announce: boolean,
+    ) => {
+      const email = session?.user?.email ?? null;
+      const provider = session?.user?.app_metadata?.provider ?? null;
+      setProvider(session ? provider ?? "email" : null);
+
+      // No session at all (signed out) — nothing to vet.
+      if (!session) {
+        if (active) setUser(null);
+        return;
       }
+
+      // Password sign-in: the app `users` row is the authority, as before.
+      if (!isThirdPartyProvider(provider)) {
+        if (active) setUser(email ? resolveAppUser(email) : null);
+        return;
+      }
+
+      // A social session that carries no email claim can't be matched against
+      // the roster, so it can't be admitted. Entra is the usual cause when the
+      // `email` scope (see OAUTH_SCOPES) isn't granted. Fall through to the
+      // same refusal path rather than returning early — otherwise the session
+      // would stay live, unvetted and silent.
+      if (!email) {
+        if (!active) return;
+        setUser(null);
+        setDeniedReason(oauthRejectionMessage("no-email"));
+        setActiveActor(null);
+        addLogRef.current(
+          "auth",
+          `blocked ${providerLabel(provider)} sign-in (no email claim)`,
+          "login",
+        );
+        await sb.auth.signOut();
+        return;
+      }
+
+      // Social sign-in: employees only.
+      let employee: Employee | null = null;
+      try {
+        employee = await db.employeeByEmail(email);
+      } catch (err) {
+        // Couldn't reach the roster — refuse rather than guess, but say so
+        // distinctly so a network blip doesn't read as "you were fired".
+        // eslint-disable-next-line no-console
+        console.error("[aurora] roster check failed during OAuth sign-in", err);
+        if (!active) return;
+        setUser(null);
+        setDeniedReason("Couldn't verify your employee record. Please try again in a moment.");
+        await sb.auth.signOut();
+        return;
+      }
+
+      const verdict = admitOAuthEmployee(email, employee ? [employee] : []);
+      if (!active) return;
+
+      if (!verdict.ok) {
+        // Tear the session down: leaving it live would keep a valid Supabase
+        // JWT in storage for someone the app just refused, and RLS grants every
+        // authenticated user read access to the shared HR tables.
+        setUser(null);
+        setDeniedReason(oauthRejectionMessage(verdict.reason));
+        setActiveActor(null);
+        addLogRef.current(
+          "auth",
+          `blocked ${providerLabel(provider)} sign-in for ${email} (${verdict.reason})`,
+          "login",
+        );
+        await sb.auth.signOut();
+        return;
+      }
+
+      const next = employeeAuthUser(verdict.employee);
+      setDeniedReason(null);
+      setUser(next);
+      if (announce) {
+        // Set the actor before logging so the entry is attributed correctly —
+        // the sync effect above hasn't run yet at this point.
+        setActiveActor(next.name || next.email, next.email);
+        addLogRef.current(
+          "auth",
+          `signed in via ${providerLabel(provider)} (${next.email})`,
+          "login",
+        );
+      }
+    };
+
+    void sb.auth.getSession().then(({ data }) => {
+      if (active) void applySession(data.session, false);
     });
 
-    const { data: sub } = supabase.auth.onAuthStateChange((event, session) => {
+    const { data: sub } = sb.auth.onAuthStateChange((event, session) => {
       if (!active) return;
       // Arriving from a reset link signs the user in with a recovery session.
       // Flag it so the app routes to the "set a new password" screen; the flag
       // is cleared once the new password is committed (or on sign-out).
       if (event === "PASSWORD_RECOVERY") setRecovery(true);
       if (event === "SIGNED_OUT") setRecovery(false);
-      const email = session?.user?.email;
-      const next = email ? resolveAppUser(email) : null;
-      setUser(next);
 
-      // An OAuth redirect lands here rather than in login(), which writes its
-      // own audit entry — so record the sign-in for that path. Restricted to
-      // SIGNED_IN with a third-party identity: a restored session on reload
-      // also fires SIGNED_IN, and that is not a new sign-in event.
-      if (event === "SIGNED_IN" && next) {
-        const provider = session?.user?.app_metadata?.provider;
-        if (provider && provider !== "email") {
-          setActiveActor(next.name || next.email, next.email);
-          addLogRef.current("auth", `signed in via ${provider} (${next.email})`, "login");
-        }
-      }
+      // An OAuth redirect lands here rather than in loginWithProvider(), which
+      // has already returned by the time the provider sends the user back — so
+      // this is where the roster check and its audit entry happen. Only
+      // SIGNED_IN counts as new: a restored session on reload fires it too, but
+      // INITIAL_SESSION is what a reload reports first.
+      void applySession(session, event === "SIGNED_IN");
     });
 
     return () => {
       active = false;
       sub.subscription.unsubscribe();
     };
-  }, [resolveAppUser]);
+  }, [resolveAppUser, employeeAuthUser, setProvider]);
 
   // Re-resolve the signed-in user whenever the app `users` list changes, so an
   // edit to the current user's profile (e.g. Settings → Profile) reflects live
   // — name and initials update without a reload. Keyed on the email so this only
   // re-runs when the roster changes, not on every re-render.
+  //
+  // Skipped for social sessions: those are clamped to self-service by policy,
+  // and re-resolving would hand them whatever the `users` row says — including
+  // admin, which is exactly what the clamp exists to prevent.
   const currentEmail = user?.email ?? null;
   React.useEffect(() => {
     if (!currentEmail) return;
+    if (isThirdPartyProvider(sessionProviderRef.current)) return;
     setUser(resolveAppUser(currentEmail));
     // resolveAppUser is recreated when `users` changes, which is the trigger.
   }, [currentEmail, resolveAppUser]);
@@ -159,6 +306,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         addLog("auth", `failed sign-in attempt for ${normalized}`, "login");
         return false;
       }
+      // A successful password sign-in supersedes any earlier OAuth refusal.
+      setDeniedReason(null);
       // onAuthStateChange sets the user; resolve immediately too so the
       // caller can navigate without waiting for the event.
       const authed = resolveAppUser(normalized);
@@ -175,17 +324,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   // Hand off to a third-party identity provider. supabase-js redirects the
   // browser to the provider; the user returns to `redirectTo` with a session in
   // the URL, which supabase-js exchanges and reports via onAuthStateChange —
-  // the same path a password login ends up on, so no extra wiring is needed to
-  // resolve the app profile.
+  // where applySession() vets it against the HR roster.
   //
-  // Sign-in only, never sign-up: the provider proves who someone is, but the
-  // app `users` row is what grants module access. An unknown email resolves to
-  // the dashboard-only profile in resolveAppUser rather than being provisioned.
+  // Sign-in only, never sign-up, and employees only: the provider proves who
+  // someone is, but the `employees` table is what says they work here. An email
+  // that isn't on the roster has its session signed straight back out rather
+  // than being provisioned a profile.
   const loginWithProvider = React.useCallback<AuthContextValue["loginWithProvider"]>(
     async (provider) => {
       if (!isSupabaseConfigured || !supabase) {
         return { ok: false, error: "A Supabase backend is required to sign in." };
       }
+
+      // Clear any refusal from a previous attempt so the old message doesn't
+      // linger behind the new redirect.
+      setDeniedReason(null);
 
       const { error } = await supabase.auth.signInWithOAuth({
         provider,
@@ -194,6 +347,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           // listed under Supabase → Authentication → URL Configuration, or the
           // provider will refuse the callback.
           redirectTo: window.location.origin,
+          // Ask for the email claim explicitly — the roster match depends on
+          // it, and Entra can otherwise omit it. See OAUTH_SCOPES.
+          scopes: OAUTH_SCOPES[provider],
         },
       });
 
@@ -312,10 +468,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     if (user) addLog("auth", `signed out (${user.email})`, "logout");
     setUser(null);
     setRecovery(false);
+    setDeniedReason(null);
+    setProvider(null);
     if (isSupabaseConfigured && supabase) {
       void supabase.auth.signOut();
     }
-  }, [user, addLog]);
+  }, [user, addLog, setProvider]);
+
+  const clearDenied = React.useCallback(() => setDeniedReason(null), []);
 
   const value = React.useMemo<AuthContextValue>(
     () => ({
@@ -324,6 +484,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       loginWithProvider,
       logout,
       isAdmin: hasFullAccess(user?.access),
+      // A social session is self-service by construction; surface it so the UI
+      // can say so rather than making the user infer it from a short sidebar.
+      isEmployeeSession: isThirdPartyProvider(sessionProvider),
+      deniedReason,
+      clearDenied,
+      sessionProvider,
       signUpUser,
       sendPasswordReset,
       recovery,
@@ -334,6 +500,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       login,
       loginWithProvider,
       logout,
+      deniedReason,
+      clearDenied,
+      // isEmployeeSession is derived from this — omitting it would leave the
+      // clamp flag stale whenever the provider changes without `user` also
+      // changing, e.g. a refused OAuth session (provider set, user stays null).
+      sessionProvider,
       signUpUser,
       sendPasswordReset,
       recovery,
