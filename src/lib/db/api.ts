@@ -220,6 +220,9 @@ export const db = {
 
   // Attendance (unique on employee_id+date)
   upsertAttendance: (a: AttendanceRecord) => upsert("attendance_records", M.attendanceToRow(a)),
+  /** Manual day edit — writes the times unconditionally so they can be cleared. */
+  upsertAttendanceDay: (a: AttendanceRecord) =>
+    upsert("attendance_records", M.attendanceDayToRow(a), "employee_id,date"),
   upsertAttendanceMany: (as: AttendanceRecord[]) =>
     upsertMany("attendance_records", as.map(M.attendanceToRow), "employee_id,date"),
   deleteAttendance: (id: string) => remove("attendance_records", id),

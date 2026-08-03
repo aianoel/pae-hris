@@ -161,6 +161,22 @@ export const attendanceToRow = (a: Partial<AttendanceRecord>): Record<string, un
   ...(a.bioId !== undefined && { bio_id: a.bioId ?? null }),
 });
 
+/**
+ * Whole-row variant for a manually edited day, where the punch times are the
+ * thing being changed.
+ *
+ * {@link attendanceToRow} omits undefined fields so a partial patch only touches
+ * what it names — but an upsert updates *only the columns in the payload*, so an
+ * omitted `time_in` keeps its old value. That makes clearing a punch impossible
+ * through the partial mapper. This one always sends both times, so undefined
+ * genuinely erases.
+ */
+export const attendanceDayToRow = (a: AttendanceRecord): Record<string, unknown> => ({
+  ...attendanceToRow(a),
+  time_in: a.timeIn ?? null,
+  time_out: a.timeOut ?? null,
+});
+
 // ---- Payroll runs ---------------------------------------------------------
 export const payrollRunFromRow = (r: any): PayrollRun => ({
   id: r.id,

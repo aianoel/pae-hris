@@ -95,6 +95,9 @@ const primeIdCounter = (ids: Iterable<string>) => {
 // fresh/offline store; every mutation write-throughs to the DB.
 const DEFAULT_AGENCIES: Agency[] = [{ name: "Direct Hire" }];
 
+/** Short weekday names, indexed by `Date.getDay()` — matches the import parser. */
+const SHORT_DAY = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
 export function StoreProvider({ children }: { children: React.ReactNode }) {
   const { toast } = useToast();
   const [employees, setEmployees] = React.useState<Employee[]>(seedEmployees);
@@ -582,6 +585,70 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       return { added, updated };
     },
     [addLog, persist],
+  );
+
+  /**
+   * Manual correction of a single day, from the Attendance screen.
+   *
+   * Matched on employee+date (the table's unique key) rather than on an id, so
+   * editing a day that only existed as a blank row in the report — the Telecom
+   * view renders every calendar day, punched or not — creates the record
+   * instead of silently doing nothing.
+   *
+   * employeeName/department/bioId are copied from the live employee, matching
+   * what the import writes and what `loadAll` re-hydrates on the next visit.
+   */
+  const upsertAttendanceDay = React.useCallback<StoreValue["upsertAttendanceDay"]>(
+    ({ employeeId, date, state, timeIn, timeOut }) => {
+      const emp = employees.find((e) => e.id === employeeId);
+      // Weekday from the date, in local time — `new Date(iso)` alone parses as
+      // UTC and lands on the previous day in UTC+8.
+      const day = SHORT_DAY[new Date(`${date}T00:00:00`).getDay()];
+      // Resolved outside the updater: an id minted inside one would be burnt
+      // twice under StrictMode's double-invoke, and the row we need to persist
+      // has to be known synchronously here.
+      const existing = attendance.find((a) => a.employeeId === employeeId && a.date === date);
+      const result: AttendanceRecord = {
+        id: existing?.id ?? nextId("ATT"),
+        employeeId,
+        employeeName: emp?.name ?? existing?.employeeName ?? "",
+        department: emp?.department ?? existing?.department ?? "",
+        date,
+        day,
+        state,
+        timeIn,
+        timeOut,
+        bioId: emp?.bioId ?? existing?.bioId,
+      };
+
+      setAttendance((prev) => {
+        const idx = prev.findIndex((a) => a.employeeId === employeeId && a.date === date);
+        if (idx < 0) return [...prev, result];
+        const next = [...prev];
+        next[idx] = result;
+        return next;
+      });
+
+      persist(() => db.upsertAttendanceDay(result));
+      addLog(
+        "attendance",
+        `${emp?.name ?? employeeId} on ${date}: ${state}${timeIn ? ` in ${timeIn}` : ""}${timeOut ? ` out ${timeOut}` : ""}`,
+        result.id,
+      );
+      return result;
+    },
+    [employees, attendance, addLog, persist],
+  );
+
+  const removeAttendanceDay = React.useCallback<StoreValue["removeAttendanceDay"]>(
+    (id) => {
+      const removed = attendance.find((a) => a.id === id);
+      if (!removed) return;
+      setAttendance((prev) => prev.filter((a) => a.id !== id));
+      persist(() => db.deleteAttendance(id));
+      addLog("attendance", `deleted attendance for ${removed.employeeName} on ${removed.date}`, id);
+    },
+    [attendance, addLog, persist],
   );
 
   const setImportedLwop = React.useCallback<StoreValue["setImportedLwop"]>(
@@ -1368,6 +1435,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     headcountFor,
     setAttendance: setAttendanceState,
     importAttendance,
+    upsertAttendanceDay,
+    removeAttendanceDay,
     timekeepingByEmployee,
     setImportedLwop,
     runPayroll,

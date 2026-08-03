@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Upload, Printer, ChevronDown, Search, X } from "lucide-react";
+import { Upload, Printer, ChevronDown, Search, X, Pencil } from "lucide-react";
 
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Button } from "@/components/ui/button";
@@ -8,6 +8,10 @@ import { useToast } from "@/components/ui/toast";
 import { useStore } from "@/store/store-context";
 import { cn } from "@/lib/utils";
 import { AttendanceUploadDialog } from "@/components/attendance/AttendanceUploadDialog";
+import {
+  AttendanceEditDialog,
+  type AttendanceEditTarget,
+} from "@/components/attendance/AttendanceEditDialog";
 import { buildTelecomReport, printTelecomReport } from "@/lib/telecomReport";
 
 const MONTH_NAMES = [
@@ -37,6 +41,8 @@ export function AttendancePage() {
   const { toast } = useToast();
   const [uploadOpen, setUploadOpen] = React.useState(false);
   const [collapsed, setCollapsed] = React.useState<Record<string, boolean>>({});
+  // The day being corrected by hand, or null when the editor is closed.
+  const [editing, setEditing] = React.useState<AttendanceEditTarget | null>(null);
 
   // Distinct months present in the data (YYYY-MM), newest first.
   const months = React.useMemo(() => {
@@ -70,6 +76,22 @@ export function AttendancePage() {
   }, [allReports, query]);
 
   const toggle = (id: string) => setCollapsed((c) => ({ ...c, [id]: !c[id] }));
+
+  // `employeeId|date` → stored record. The report renders every calendar day in
+  // the period, so a clicked row may have no record behind it — the editor then
+  // creates one.
+  const recordByDay = React.useMemo(
+    () => new Map(attendance.map((a) => [`${a.employeeId}|${a.date}`, a])),
+    [attendance],
+  );
+
+  const editDay = (employeeId: string, employeeName: string, date: string) =>
+    setEditing({
+      employeeId,
+      employeeName,
+      date,
+      record: recordByDay.get(`${employeeId}|${date}`),
+    });
 
   const onPrint = () => {
     const ok = printTelecomReport(reports, { subtitle: month ? monthLabel(month) : undefined });
@@ -211,11 +233,17 @@ export function AttendancePage() {
                               {c}
                             </th>
                           ))}
+                          <th className="w-10 px-3 py-2">
+                            <span className="sr-only">Actions</span>
+                          </th>
                         </tr>
                       </thead>
                       <tbody>
                         {r.days.map((d) => (
-                          <tr key={d.date} className="border-t border-border/60 even:bg-muted/20">
+                          <tr
+                            key={d.date}
+                            className="group border-t border-border/60 even:bg-muted/20"
+                          >
                             <td className="whitespace-nowrap px-3 py-1.5 text-left tabular-nums text-foreground">
                               {d.date}
                             </td>
@@ -237,6 +265,19 @@ export function AttendancePage() {
                             >
                               {d.dutyHours.toFixed(2)}
                             </td>
+                            <td className="px-3 py-1.5 text-right">
+                              <button
+                                type="button"
+                                onClick={() => editDay(r.employeeId, r.employeeName, d.date)}
+                                // Kept in the layout at all times (opacity, not
+                                // display) so the column never reflows on hover;
+                                // always visible to keyboard focus.
+                                className="rounded p-1 text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring group-hover:opacity-100"
+                                aria-label={`Edit attendance for ${r.employeeName} on ${d.date}`}
+                              >
+                                <Pencil className="h-3.5 w-3.5" />
+                              </button>
+                            </td>
                           </tr>
                         ))}
                       </tbody>
@@ -250,6 +291,7 @@ export function AttendancePage() {
       )}
 
       <AttendanceUploadDialog open={uploadOpen} onOpenChange={setUploadOpen} />
+      <AttendanceEditDialog target={editing} onOpenChange={(o) => !o && setEditing(null)} />
     </>
   );
 }

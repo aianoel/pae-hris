@@ -108,6 +108,23 @@ export interface StoreValue {
     records: Omit<AttendanceRecord, "id">[],
   ) => { added: number; updated: number };
   /**
+   * Create or correct one employee's day by hand (Attendance → edit a row).
+   *
+   * Keyed on employee+date, not id: that is the table's unique key, so an admin
+   * filling in a day the biometric file never produced must update the existing
+   * row if a later import has since created one. Times are `HH:MM:SS` (24h);
+   * pass undefined to clear a punch. Returns the resulting record.
+   */
+  upsertAttendanceDay: (entry: {
+    employeeId: string;
+    date: string;
+    state: AttendanceState;
+    timeIn?: string;
+    timeOut?: string;
+  }) => AttendanceRecord;
+  /** Delete a single day's record (an entry logged in error). */
+  removeAttendanceDay: (id: string) => void;
+  /**
    * Itemised unpaid time per employee id from the last biometric import —
    * unpaid-leave days, unexcused absent days and pro-rated tardiness. Payroll
    * charges each on its own deduction line (LWOP / absences / late), so a day
