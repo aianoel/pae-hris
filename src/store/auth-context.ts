@@ -66,6 +66,25 @@ export interface AuthContextValue {
     password: string,
   ) => Promise<{ ok: boolean; error?: string; needsConfirmation?: boolean }>;
   /**
+   * Public self-registration from the login screen — employees only, and
+   * clamped to self-service exactly like an OAuth sign-in.
+   *
+   * Distinct from {@link AuthContextValue.signUpUser}, which is the admin
+   * provisioning path (Users → Add user): that one runs from an existing admin
+   * session, preserves it, and pairs with a `users` row that may grant any
+   * access. This one runs unauthenticated and can never grant more than the
+   * self-service set.
+   *
+   * `needsConfirmation` is true when Supabase requires an email confirmation:
+   * the account exists but no session was issued, so the roster check is
+   * deferred until the link is followed. Callers must not report success as
+   * "you're in" in that case.
+   */
+  signUpEmployee: (
+    email: string,
+    password: string,
+  ) => Promise<{ ok: boolean; error?: string; needsConfirmation?: boolean }>;
+  /**
    * Email a Supabase password-recovery link to an account. Safe to call from an
    * admin session: it does not touch the caller's session and never exposes the
    * target's password. The recipient sets the new password themselves via the

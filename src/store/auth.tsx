@@ -13,13 +13,14 @@ import {
   isThirdPartyProvider,
   oauthRejectionMessage,
   providerLabel,
+  signUpRejectionMessage,
 } from "@/lib/oauthAccess";
 import {
   AuthContext,
   type AuthUser,
   type AuthContextValue,
 } from "@/store/auth-context";
-import type { Employee } from "@/store/types";
+import type { Employee, User } from "@/store/types";
 
 /**
  * Auth session.
@@ -170,10 +171,34 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         return;
       }
 
-      // Password sign-in: the app `users` row is the authority, as before.
+      // Password sign-in with a provisioned `users` row: that row is the
+      // authority, as before — this is the admin path.
+      //
+      // Without one, the address is NOT automatically a stranger to turn away:
+      // self-registered employees (see signUpEmployee) also arrive as
+      // provider:"email" and have no `users` row by design. So fall through to
+      // the roster check rather than resolving to a default profile — doing the
+      // latter would hand anyone who completed sign-up a session, making the
+      // registration form a way in for non-staff.
       if (!isThirdPartyProvider(provider)) {
-        if (active) setUser(email ? resolveAppUser(email) : null);
-        return;
+        if (!email) {
+          if (active) setUser(null);
+          return;
+        }
+        let appUser: User | null = null;
+        try {
+          appUser = await db.userByEmail(email);
+        } catch (err) {
+          // Can't tell admin from employee. Fall through to the roster check:
+          // it fails closed, so the worst case is a legitimate admin being told
+          // to retry — never an unvetted session.
+          // eslint-disable-next-line no-console
+          console.error("[aurora] users lookup failed during sign-in", err);
+        }
+        if (appUser) {
+          if (active) setUser(resolveAppUser(email));
+          return;
+        }
       }
 
       // A social session that carries no email claim can't be matched against
@@ -424,6 +449,96 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     [user, addLog],
   );
 
+  /**
+   * Public sign-up, from the login screen. Employees only.
+   *
+   * Same policy as OAuth, different mechanics. The roster lives behind RLS and
+   * the `anon` role has NO database access (see db/schema.supabase.sql), so an
+   * unauthenticated visitor cannot be checked against `employees` *before*
+   * signing up — there is no way to ask. The credential is therefore created
+   * first, and vetted the moment a session exists:
+   *
+   *   • Session returned (email confirmation OFF) — applySession() in the
+   *     auth listener does the roster check, and signs the session straight
+   *     back out if the address isn't staff. We report the verdict here too so
+   *     the form can say something more useful than a generic error.
+   *   • No session (email confirmation ON) — nothing to check against yet. The
+   *     account exists but is inert until confirmed, and the roster check runs
+   *     when they follow the link and a session finally lands. A non-employee
+   *     who confirms is bounced at that point.
+   *
+   * Either way a non-employee ends up with a Supabase Auth credential that can
+   * never open an app session. That is the unavoidable cost of RLS having no
+   * anon read path; it grants nothing, and admins can clear such accounts from
+   * the Supabase dashboard.
+   */
+  const signUpEmployee = React.useCallback<AuthContextValue["signUpEmployee"]>(
+    async (email, password) => {
+      const normalized = email.trim().toLowerCase();
+      if (!normalized) return { ok: false, error: "An email address is required." };
+      if (!password) return { ok: false, error: "A password is required." };
+
+      if (!isSupabaseConfigured || !supabase) {
+        return { ok: false, error: "A Supabase backend is required to create an account." };
+      }
+      const sb = supabase;
+
+      const { data, error } = await sb.auth.signUp({
+        email: normalized,
+        password,
+        options: { emailRedirectTo: window.location.origin },
+      });
+
+      if (error) return { ok: false, error: error.message };
+
+      // Supabase obscures "already registered" to avoid email enumeration: it
+      // returns a user with an EMPTY identities array and no error. Keep that
+      // property — say the same thing we would for a fresh address, and point
+      // at sign-in rather than confirming the account exists.
+      if (data.user && (data.user.identities?.length ?? 0) === 0) {
+        return {
+          ok: false,
+          error: "If that address can be registered, an account already exists for it. Try signing in, or reset your password.",
+        };
+      }
+
+      // Confirmation required: no session yet, so the roster check has to wait
+      // for the confirmation link. Don't claim they're in.
+      if (!data.session) {
+        addLog("auth", `sign-up started for ${normalized}`, "signup");
+        return { ok: true, needsConfirmation: true };
+      }
+
+      // Signed in immediately — vet now so the form can report the refusal.
+      // applySession() is running the same check off the SIGNED_IN event and
+      // owns tearing the session down; this call only decides what to say.
+      let employee: Employee | null = null;
+      try {
+        employee = await db.employeeByEmail(normalized);
+      } catch {
+        // The listener will refuse the session on its own roster-check failure.
+        return {
+          ok: false,
+          error: "Couldn't verify your employee record. Please try again in a moment.",
+        };
+      }
+
+      const verdict = admitOAuthEmployee(normalized, employee ? [employee] : []);
+      if (!verdict.ok) {
+        addLog("auth", `blocked sign-up for ${normalized} (${verdict.reason})`, "signup");
+        // Belt and braces: applySession() signs this out too, but that depends
+        // on the event firing. A credential we just refused must not keep a
+        // live session under any ordering.
+        await sb.auth.signOut();
+        return { ok: false, error: signUpRejectionMessage(verdict.reason) };
+      }
+
+      addLog("auth", `signed up ${normalized}`, "signup");
+      return { ok: true, needsConfirmation: false };
+    },
+    [addLog],
+  );
+
   // Email a password-recovery link. Unlike signUpUser this never mints or
   // swaps a session, so the admin's session is untouched — Supabase just sends
   // the mail and the recipient sets their own password via the link.
@@ -491,6 +606,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       clearDenied,
       sessionProvider,
       signUpUser,
+      signUpEmployee,
       sendPasswordReset,
       recovery,
       completePasswordReset,
@@ -507,6 +623,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       // changing, e.g. a refused OAuth session (provider set, user stays null).
       sessionProvider,
       signUpUser,
+      signUpEmployee,
       sendPasswordReset,
       recovery,
       completePasswordReset,

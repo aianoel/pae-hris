@@ -1,5 +1,5 @@
 import * as React from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
 import { Eye, EyeOff, Lock, Mail, ShieldAlert, X } from "lucide-react";
 
@@ -297,20 +297,12 @@ export function LoginForm() {
 
       <p className="mt-8 text-center text-sm text-muted-foreground">
         Don&apos;t have an account?{" "}
-        <a
-          href="#"
-          onClick={(e) => {
-            e.preventDefault();
-            toast({
-              variant: "info",
-              title: "Create your account",
-              description: "The sign-up flow would open here.",
-            });
-          }}
+        <Link
+          to="/signup"
           className="rounded font-semibold text-primary transition-colors hover:text-primary/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
         >
-          Sign up for free
-        </a>
+          Sign up
+        </Link>
       </p>
     </motion.div>
   );

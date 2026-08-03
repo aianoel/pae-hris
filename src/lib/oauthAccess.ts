@@ -1,16 +1,21 @@
 /**
- * Admission policy for third-party (Google / Microsoft) sign-in.
+ * Admission policy for self-service sign-in — the two ways into this app that
+ * nobody vetted in advance: a third-party provider (Google / Microsoft) and
+ * public sign-up.
  *
- * A social provider proves *who someone is*. It says nothing about whether they
- * work here — anyone in the world can present a valid Google account. So the
- * provider is only half the check: the returned email must also match a row on
- * the HR roster (`employees`), which is this app's record of employment.
+ * Both prove *who someone is* and neither says anything about whether they work
+ * here — anyone in the world can present a valid Google account or fill in a
+ * registration form. So identity is only half the check: the email must also
+ * match a row on the HR roster (`employees`), which is this app's record of
+ * employment.
  *
  * Everything admitted this way is clamped to the EMPLOYEE role: self-service
  * only, no admin modules. That holds even when the same address also has an
  * elevated `users` row — administering payroll must not be reachable from a
- * consumer Google or Microsoft account, whose recovery flow is outside this
- * organisation's control. Admins sign in with email + password.
+ * consumer Google or Microsoft account (whose recovery flow is outside this
+ * organisation's control), nor from a password someone chose for themselves on
+ * a public form. Admin accounts are provisioned by an existing admin from
+ * Users → Add user, and only that path can carry elevated access.
  *
  * SCOPE IS NOT SECURITY. Like `selfService.ts`, this is a client-side clamp on
  * what the UI offers. The data tables are still `FOR ALL TO authenticated` (see
@@ -26,7 +31,7 @@ import { ALWAYS_ALLOWED } from "@/lib/access";
 export const OAUTH_PROVIDERS = ["google", "azure"] as const;
 export type OAuthProviderId = (typeof OAUTH_PROVIDERS)[number];
 
-/** The app role every third-party sign-in resolves to. */
+/** The app role every self-service sign-in (OAuth or sign-up) resolves to. */
 export const EMPLOYEE_ROLE = "Employee";
 
 /**
@@ -106,4 +111,20 @@ export function oauthRejectionMessage(reason: OAuthRejection): string {
     return "This account is no longer active. Contact HR if you believe this is a mistake.";
   }
   return "This sign-in is for employees only. Use the email and password issued for your account, or contact HR.";
+}
+
+/**
+ * What to tell someone whose sign-up was refused.
+ *
+ * Same enumeration concern as {@link oauthRejectionMessage}, and then some: the
+ * registration form is the most convenient oracle an attacker could ask for, so
+ * "not on the roster" must not be distinguishable from a mistyped address. The
+ * wording explains the rule (work email, must be on the roster) without
+ * confirming anything about the address that was entered.
+ */
+export function signUpRejectionMessage(reason: OAuthRejection): string {
+  if (reason === "inactive") {
+    return "This account is no longer active. Contact HR if you believe this is a mistake.";
+  }
+  return "We couldn't match that address to an employee record. Use the work email HR holds for you, or contact HR to get set up.";
 }

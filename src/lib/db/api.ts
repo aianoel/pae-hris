@@ -165,6 +165,29 @@ async function fetchEmployeeByEmail(email: string): Promise<Employee | null> {
   return data ? M.employeeFromRow(data) : null;
 }
 
+/**
+ * Look up a single app `users` row by email.
+ *
+ * Same timing problem as {@link fetchEmployeeByEmail}: admission decisions are
+ * made the moment a session lands, before the store's bulk `loadAll()` has
+ * necessarily returned. Reading the in-memory list then would see an empty
+ * array and misread a provisioned admin as an unknown address.
+ *
+ * Note the RLS shape (migration 008): a non-admin may read ONLY their own row.
+ * That is exactly this query — "is there a users row for *me*" — so it works
+ * for every caller, and returns null rather than erroring when there isn't one.
+ */
+async function fetchUserByEmail(email: string): Promise<User | null> {
+  const sb = requireSupabase();
+  const { data, error } = await sb
+    .from("users")
+    .select("*")
+    .eq("email", email.trim().toLowerCase())
+    .maybeSingle();
+  if (error) throw error;
+  return data ? M.userFromRow(data) : null;
+}
+
 // ---- Per-entity write-through --------------------------------------------
 export const db = {
   configured: () => Boolean(supabase),
@@ -174,6 +197,7 @@ export const db = {
   deleteEmployee: (id: string) => remove("employees", id),
   upsertEmployees: (es: Employee[]) => upsertMany("employees", es.map(M.employeeToRow)),
   employeeByEmail: (email: string) => fetchEmployeeByEmail(email),
+  userByEmail: (email: string) => fetchUserByEmail(email),
 
   // Users
   upsertUser: (u: User) => upsert("users", M.userToRow(u)),

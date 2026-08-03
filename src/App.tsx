@@ -26,6 +26,7 @@ import { SettingsPage } from "@/pages/SettingsPage";
 import { LogsPage } from "@/pages/LogsPage";
 import { RolesPage } from "@/pages/RolesPage";
 import { LoginPage } from "@/components/auth/LoginPage";
+import { SignUpPage } from "@/components/auth/SignUpPage";
 import { ResetPasswordPage } from "@/components/auth/ResetPasswordPage";
 
 /**
@@ -59,10 +60,26 @@ function LoginRoute() {
   return <LoginPage />;
 }
 
+/**
+ * Same guard as LoginRoute: a signed-in user has no business on the sign-up
+ * form, and a recovery session must still be held on the reset screen — a
+ * reset link must not become a way around it by typing /signup.
+ */
+function SignUpRoute() {
+  const { user, recovery } = useAuth();
+  if (recovery) return <ResetPasswordPage />;
+  if (user) return <Navigate to="/" replace />;
+  return <SignUpPage />;
+}
+
 const router = createBrowserRouter([
   {
     path: "/login",
     element: <LoginRoute />,
+  },
+  {
+    path: "/signup",
+    element: <SignUpRoute />,
   },
   {
     path: "/",
